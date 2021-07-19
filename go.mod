@@ -1,6 +1,6 @@
 module github.com/quay/claircore
 
-go 1.14
+go 1.16
 
 require (
 	github.com/aquasecurity/go-dep-parser v0.0.0-20210329064738-2751c4603480
@@ -28,6 +28,7 @@ require (
 	go.opentelemetry.io/otel v0.15.0
 	golang.org/x/sync v0.0.0-20201207232520-09787c993a3a
 	golang.org/x/time v0.0.0-20210220033141-f8bda1e9f3ba
-	golang.org/x/tools v0.0.0-20200811032001-fd80f4dbb3ea
+	golang.org/x/tools v0.0.0-20201124115921-2c860bdd6e78
 	gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c
+	modernc.org/sqlite v1.11.2
 )
