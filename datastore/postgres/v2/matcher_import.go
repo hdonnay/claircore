@@ -1,4 +1,4 @@
-//go:build go1.23
+////go:build go1.23
 
 package postgres
 
@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -58,13 +57,14 @@ var (
 		"attr",
 	}
 
-	advisorySourceOrd = sync.OnceValue(func() map[string]int {
-		ord := make(map[string]int, len(advisorySourceNames))
-		for i, n := range advisorySourceNames {
-			ord[n] = i
-		}
-		return ord
-	})
+	advisorySourceOrd = struct {
+		Advisory  int
+		Reference int
+		Package   int
+		Attr      int
+	}{
+		0, 1, 2, 3,
+	}
 )
 
 var onlyDigit = regexp.MustCompile(`^\d+$`)
@@ -80,6 +80,7 @@ func formatRange(r *driver.Range) (string, error) {
 		b.WriteByte(char[i])
 	}
 	fmtval := func(e driver.RangeEndpoint) error {
+		const strdelim = `$v$`
 		b.WriteByte('{')
 		for _, s := range e.Value {
 			if onlyDigit.MatchString(s) {
@@ -87,10 +88,14 @@ func formatRange(r *driver.Range) (string, error) {
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(&b, "'%010d',", i)
+				fmt.Fprintf(&b, "'%010d'", i)
 				continue
+			} else {
+				b.WriteString(strdelim)
+				b.WriteString(s)
+				b.WriteString(strdelim)
 			}
-			fmt.Fprintf(&b, "$v$%s$v$,", s)
+			b.WriteByte(',')
 		}
 		b.WriteString("NULL}")
 		return nil
@@ -114,16 +119,20 @@ func (src *advisorySource) Next() (ok bool) {
 }
 
 func (src *advisorySource) Values() ([]interface{}, error) {
-	ord := advisorySourceOrd()
-	row := make([]interface{}, len(ord))
+	ord := advisorySourceOrd
+	row := make([]interface{}, len(advisorySourceNames))
+	row[ord.Advisory] = make([]interface{}, 10)
+	row[ord.Reference] = make([]interface{}, 10)
+	row[ord.Package] = make([]interface{}, 10)
+	row[ord.Attr] = make([]interface{}, 10)
 
-	src.row[ord["name"]] = v.Name
-	src.row[ord["issued"]] = v.Issued
-	src.row[ord["summary"]] = v.Summary
-	src.row[ord["description"]] = v.Description
-	src.row[ord["uri"]] = v.URI
-	src.row[ord["severity"]] = v.Severity.Upstream
-	src.row[ord["normalized_severity"]] = v.Severity.Normalized.String()
+	row[ord["name"]] = src.v.Name
+	row[ord["issued"]] = src.v.Issued
+	row[ord["summary"]] = src.v.Summary
+	row[ord["description"]] = src.v.Description
+	row[ord["uri"]] = src.v.URI
+	row[ord["severity"]] = src.v.Severity.Upstream
+	row[ord["normalized_severity"]] = src.v.Severity.Normalized.String()
 	// now, refs:
 	v.Reference(func(r driver.Reference, err error) bool {
 		if err != nil {
