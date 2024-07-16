@@ -19,7 +19,6 @@ require (
 	github.com/package-url/packageurl-go v0.1.3
 	github.com/prometheus/client_golang v1.22.0
 	github.com/quay/claircore/toolkit v1.2.4
-	github.com/quay/claircore/updater/driver v1.0.0
 	github.com/quay/goval-parser v0.8.8
 	github.com/quay/zlog v1.1.8
 	github.com/remind101/migrate v0.0.0-20170729031349-52c1edff7319
@@ -71,5 +70,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.9.1 // indirect
 )
-
-replace github.com/quay/claircore/updater/driver => ./updater/driver
