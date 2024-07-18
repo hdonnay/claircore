@@ -1,14 +1,11 @@
-////go:build go1.23
+//go:build skip
 
 package postgres
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"regexp"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -69,6 +66,7 @@ var (
 
 var onlyDigit = regexp.MustCompile(`^\d+$`)
 
+/*
 func formatRange(r *driver.Range) (string, error) {
 	var b strings.Builder
 	char := []byte{0x00, '[', '(', ']', ')'}
@@ -112,6 +110,7 @@ func formatRange(r *driver.Range) (string, error) {
 	endpt(r.Upper, false)
 	return b.String(), nil
 }
+*/
 
 func (src *advisorySource) Next() (ok bool) {
 	src.v, src.err, ok = src.next()
