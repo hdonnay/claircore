@@ -1,7 +1,9 @@
 package driver
 
 import (
+	"context"
 	"errors"
+	"io"
 	"iter"
 	"time"
 
@@ -20,9 +22,11 @@ type Fingerprint []byte
 // UpdateOperation is a unique update to the Store by an Updater.
 type UpdateOperation struct {
 	Date        time.Time
+	Error       error
 	Updater     string
 	Fingerprint Fingerprint
 	Ref         uuid.UUID
+	Success     bool
 }
 
 // UpdateDiff represents added or removed vulnerabilities between update
@@ -32,12 +36,19 @@ type UpdateDiff struct {
 	Prev, Cur      UpdateOperation
 }
 
+type UpdateDifference interface {
+	Operations(context.Context) (prev, cur UpdateOperation, err error)
+	Added(context.Context) (iter.Seq2[Advisory, error], error)
+	Removed(context.Context) (iter.Seq2[Advisory, error], error)
+	io.Closer
+}
+
 // NamespacedAdvisory is one of the advisory types along with a namespace.
 //
 // This is added by the controller and not used in Updater implementations.
 type NamespacedAdvisory[A Advisory | AdvisoryName] struct {
-	Updater  string
 	Advisory A
+	Updater  string
 }
 
 // NamespaceSeq wraps the passed iterator and adds the provided namespace.
