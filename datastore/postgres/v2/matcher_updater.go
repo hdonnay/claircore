@@ -15,15 +15,17 @@ import (
 	"github.com/quay/claircore/updater/driver/v2"
 )
 
-func (u *Matcher) GetUpdateOperations(ctx context.Context) iter.Seq2[driver.UpdateOperation, error] {
-	const sz = 8 // Guess at a batch size.
-	var span trace.Span
-	ctx, span = tracer.Start(ctx, "Matcher.GetUpdateOperations")
+func (u *Matcher) GetUpdateOperations(ctx context.Context, opts ...TODO) iter.Seq2[driver.UpdateOperation, error] {
+	// This function delays all setup until the iterator is used.
+	//
+	// It's possible (although I can't think of a scenario at present) to create
+	// an iterator on the off-chance it'll be needed and only pay the allocation
+	// costs.
+	return func(yield func(driver.UpdateOperation, error) bool) {
+		ctx, span := tracer.Start(ctx, "Matcher.GetUpdateOperations")
+		defer span.End()
 
-	var cache ringbuf[driver.UpdateOperation]
-	cache.Init(sz)
-
-	return func(yeild func(driver.UpdateOperation, error) bool) {
+		// TODO(hank) Move to embedded SQL.
 		const query = `SELECT "id", "name", "ref", "date", "success", "fingerprint"::BYTEA, "error"
 		FROM updater_v1.run
 			JOIN updater_v1.updater ON updater.id = run.updater
@@ -31,51 +33,59 @@ func (u *Matcher) GetUpdateOperations(ctx context.Context) iter.Seq2[driver.Upda
 			id > $2
 		LIMIT $1
 		ORDER BY (date, id) ASC;`
+
+		// Use a ring buffer to request batches of rows. This is an attempt to
+		// balance network round-trips (and query overhead) with buffering the
+		// entire result set in the process' memory.
+		ring := getRing[driver.UpdateOperation](0)
+		defer putRing(ring)
+		// Pagination token.
 		var last pgtype.Int8
+		// Last database fetch contained the last page of results.
 		done := false
-		defer span.End()
 
 		for {
 			switch {
-			case cache.Empty() && done:
+			case ring.Empty() && done:
 				return
-			case cache.Empty():
-				// Pull rows
+			case ring.Empty(): // Pull rows.
 			default:
-				op, _ := cache.Shift()
-				if !yeild(op, nil) {
+				op, _ := ring.Shift()
+				if !yield(op, nil) {
 					return
 				}
 				continue
 			}
 
+			// Use [pgxpool.AcquireFunc] to create a nice, contained scope.
 			err := u.pool.AcquireFunc(ctx, func(c *pgxpool.Conn) error {
-				rows, err := c.Query(ctx, query, cache.Cap(), &last)
+				// TODO(hank) Per-request metrics?
+				rows, err := c.Query(ctx, query, ring.Size(), &last)
 				if err != nil {
 					return err
 				}
 				defer rows.Close()
 				for rows.Next() {
-					if err := rows.Scan(&last); err != nil {
+					op, _ := ring.Alloc()
+					if err := rows.Scan(&last, &op.Updater, &op.Ref, &op.Date, &op.Success, &op.Fingerprint, &op.Error); err != nil {
+						ring.Pop()
 						return err
 					}
-					op, err := pgx.RowToStructByNameLax[driver.UpdateOperation](rows)
-					if err != nil {
-						return err
-					}
-					cache.Push(op)
 				}
-				done = !cache.Full()
+				// Done if the page was not full.
+				done = !ring.Full()
 				switch err := rows.Err(); {
 				case err == nil:
 				case errors.Is(err, pgx.ErrNoRows):
+					// Empty page; "done" will be set and the switch in the
+					// yield loop will exit the function.
 				default:
 					return err
 				}
 				return nil
 			})
 			if err != nil {
-				yeild(driver.UpdateOperation{}, err)
+				yield(driver.UpdateOperation{}, err)
 				return
 			}
 		}
@@ -154,12 +164,12 @@ func (r *UpdaterRun) Close() error {
 }
 
 type UpdaterDeltaRun struct {
-	link []trace.Link
-	err  error
-
-	id   int64
-	gen  int64
 	conn *pgxpool.Conn
+	err  error
+	link []trace.Link
+
+	id  int64
+	gen int64
 }
 
 func (u *UpdaterDeltaRun) Add(ctx context.Context, vs AddSeq) error {
@@ -197,12 +207,12 @@ func (u *UpdaterDeltaRun) Close(ctx context.Context) error {
 }
 
 type UpdaterSnapshotRun struct {
-	link []trace.Link
-	err  error
-
-	id   int64
-	gen  int64
 	conn *pgxpool.Conn
+	err  error
+	link []trace.Link
+
+	id  int64
+	gen int64
 }
 
 func (u *UpdaterSnapshotRun) Previous(ctx context.Context) (driver.UpdateOperation, bool, error) {
