@@ -1,3 +1,60 @@
+/*
+Package postgres implements v2 of the claircore datastore interfaces.
+
+# Indexer
+
+tktk
+
+# Matcher
+
+tktk
+
+# Updater
+
+tktk
+
+# Contributing
+
+Functions should make use of [pgxpool.Pool.AcquireFunc]/[pgx.BeginTxFunc] to make use of the observability helpers
+(see [Configure] and [o11y]).
+
+SQL statements are embedded as string literals.
+
+Read methods should generally follow this pattern:
+
+	func (*S) GetKind(ctx context.Context, args any, token string) (iter.Seq2[Kind, error], func() string) {}
+
+This means the method should take a pagination token as the last argument and return
+an iterator and a function to return the pagination token for the most recently yielded value.
+There are helpers to implement this in an efficient way; see the [cursor] and [ringbuf] packages.
+
+This method signature and helpers force queries to be written using keyset pagination,
+which is needed for efficient queries.
+
+This sort of method allows for efficient memory use in RPC situations:
+
+	const breakSz = 102400
+	func handler(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var b bytes.Buffer
+		enc := jsontext.NewEncoder(&b)
+		enc.WriteToken(jsontext.ArrayStart)
+		seq, token := matcher.GetKind(ctx, r.FormValue("last"))
+		for k, err := range seq {
+			if err != nil {
+				http.Error(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			json.MarshalEncode(enc, k)
+			if b.Len() >= breakSz {
+				break
+			}
+		}
+		enc.WriteToken(jsontext.ArrayEnd)
+		w.Header().Set("Link", fmt.Sprintf("<.?last=%s>;rel=next", token()))
+		io.Copy(w, &b)
+	}
+*/
 package postgres
 
 // Style tip: use the "Func" methods on the Pool to get a scope for

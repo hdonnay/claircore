@@ -1,0 +1,189 @@
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/quay/claircore/datastore/postgres/v2/internal/o11y"
+)
+
+// ErrPre is a prefix for error strings.
+const errPre = `postgres/v2: `
+
+// Configure returns a copy of the passed [pgxpool.Config] modified with
+// observability hooks and other needed settings.
+//
+// Any existing hooks will still be called.
+func Configure(ctx context.Context, cfg *pgxpool.Config) *pgxpool.Config {
+	cfg = cfg.Copy()
+
+	if f := cfg.AfterConnect; f != nil {
+		cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+			return errors.Join(
+				f(ctx, conn),
+				registerDataTypes(ctx, conn),
+			)
+		}
+	} else {
+		cfg.AfterConnect = registerDataTypes
+	}
+
+	o11y.SetHooks(cfg)
+	o11y.SetTracer(cfg)
+	cfg.ConnConfig.OnNotice = noticeHandler(ctx)
+
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = make(map[string]string)
+	}
+	// emulate "fallback_application_name"
+	if _, exist := cfg.ConnConfig.RuntimeParams["application_name"]; !exist {
+		name := "claircore/v4"
+		if mode := os.Getenv("CLAIR_MODE"); mode != "" && mode != "combo" {
+			name += "/" + mode
+		}
+		cfg.ConnConfig.RuntimeParams["application_name"] = name
+	}
+	cfg.ConnConfig.RuntimeParams["client_encoding"] = "UTF8"
+
+	if cfg.ConnConfig.ConnectTimeout <= 0 {
+		cfg.ConnConfig.ConnectTimeout = 30 * time.Second
+	}
+
+	return cfg
+}
+
+// SanityCheck runs a bunch of status checks against a database.
+//
+// [pgconn.PgConn.ParameterStatus] keys:
+// - application_name
+// - is_superuser
+// - client_encoding
+// - scram_iterations
+// - DateStyle
+// - server_encoding
+// - default_transaction_read_only
+// - server_version
+// - in_hot_standby
+// - session_authorization
+// - integer_datetimes
+// - standard_conforming_strings
+// - IntervalStyle
+// - TimeZone
+func sanityCheck(ctx context.Context, workMem *int64, migrationTable string, schemaVer int) func(*pgxpool.Conn) error {
+	const minDBVersion int64 = 15
+	return func(conn *pgxpool.Conn) error {
+		ll := conn.Conn().PgConn()
+
+		// Check parameters returned from the database:
+		param := ll.ParameterStatus("server_version")
+		pgMaj, _ /*pgMin*/, ok := strings.Cut(param, ".")
+		if !ok {
+			return fmt.Errorf("unable to determine database version: weird format: %q", param)
+		}
+		pgVersion, err := strconv.ParseInt(pgMaj, 10, 0)
+		if err != nil {
+			return fmt.Errorf("unable to determine database version: %w", err)
+		}
+		if got, want := pgVersion, minDBVersion; got < want {
+			return fmt.Errorf("database version too low: %d < %d", got, want)
+		}
+		if got, want := ll.ParameterStatus("client_encoding"), "UTF8"; got != want {
+			return fmt.Errorf("bad client encoding: client_encoding == %q (need %q)", got, want)
+		}
+		if got, want := ll.ParameterStatus("standard_conforming_strings"), "on"; got != want {
+			return fmt.Errorf("need standard conforming strings: standard_conforming_strings == %v", got == want)
+		}
+
+		// Check migration version:
+		var migrationVersion int
+		if err := conn.QueryRow(ctx, initSelectVersion, migrationTable).Scan(&migrationVersion); err != nil {
+			return fmt.Errorf("unable to determine version: %w", err)
+		}
+		if got, want := migrationVersion, schemaVer; got < want {
+			return fmt.Errorf("schema version too low: %d < %d (run migrations)", got, want)
+		}
+
+		// Query the server's `work_mem`:
+		var setting string
+		if err := conn.QueryRow(ctx, initSelectWorkMem).Scan(&setting); err != nil {
+			return fmt.Errorf("unable to determine work_mem: %w", err)
+		}
+		mem, err := strconv.ParseInt(setting, 10, 64)
+		if err != nil {
+			return fmt.Errorf("unable to determine work_mem: %w", err)
+		}
+		*workMem = mem
+		return nil
+	}
+}
+
+// NoticeHandler returns a handler to log notices from the database, using the
+// passed Context.
+func noticeHandler(ctx context.Context) func(*pgconn.PgConn, *pgconn.Notice) {
+	// TODO(hank) turn these into logs
+	_ = ctx
+	return func(conn *pgconn.PgConn, n *pgconn.Notice) {
+		/*
+			level := slog.LevelDebug - 3
+			switch n.Severity {
+			case "ERROR", "FATAL", "PANIC":
+				level = slog.LevelError
+			case "WARNING":
+				level = slog.LevelWarn
+			case "NOTICE", "INFO", "LOG":
+				level = slog.LevelInfo
+			case "DEBUG":
+				level = slog.LevelDebug
+			}
+			slog.Log(ctx, level, "notice from database", "notice", noticeLogger{n})
+		*/
+	}
+}
+
+type noticeLogger struct {
+	*pgconn.Notice
+}
+
+func (n noticeLogger) LogValue() slog.Value {
+	// Could unroll this, but it'd be annoying.
+	todo := []struct {
+		field *string
+		key   string
+	}{
+		{&n.Code, "code"},
+		{&n.Message, "message"},
+		{&n.Detail, "detail"},
+		{&n.Hint, "hint"},
+		{&n.Where, "where"},
+		{&n.SchemaName, "schema_name"},
+		{&n.TableName, "table_name"},
+		{&n.ColumnName, "column_name"},
+		{&n.DataTypeName, "data_type_name"},
+		{&n.ConstraintName, "constraint_name"},
+		{&n.File, "file"},
+		{&n.Routine, "routine"},
+	}
+	as := make([]slog.Attr, 0, len(todo)+2)
+	for _, t := range todo {
+		if *t.field != "" {
+			as = append(as, slog.String(t.key, *t.field))
+		}
+	}
+	if n.Position > 0 {
+		as = append(as, slog.Int64("position", int64(n.Position)))
+	}
+	if n.Line > 0 {
+		as = append(as, slog.Int64("line", int64(n.Line)))
+	}
+	return slog.GroupValue(as...)
+}
