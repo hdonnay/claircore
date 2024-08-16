@@ -25,6 +25,7 @@ require (
 	github.com/remind101/migrate v0.0.0-20170729031349-52c1edff7319
 	github.com/rs/zerolog v1.30.0
 	github.com/spdx/tools-golang v0.5.5
+	github.com/sqids/sqids-go v0.4.1
 	github.com/ulikunitz/xz v0.5.11
 	go.opentelemetry.io/otel v1.35.0
 	go.opentelemetry.io/otel/metric v1.35.0
