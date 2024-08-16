@@ -15,7 +15,8 @@ import (
 	"github.com/jackc/pgconn"
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/log/testingadapter"
-	"github.com/jackc/pgx/v4/pgxpool"
+	v4pool "github.com/jackc/pgx/v4/pgxpool"
+	v5pool "github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
@@ -24,7 +25,7 @@ var (
 
 	up        sync.Once
 	pkgDB     *Engine
-	pkgConfig *pgxpool.Config
+	pkgConfig *v4pool.Config
 )
 
 func mkIDs() (uint64, uint64) {
@@ -35,6 +36,7 @@ func mkIDs() (uint64, uint64) {
 
 func init() {
 	// Seed our rng.
+	// TODO(hank) Move to [math/rand/v2].
 	b := make([]byte, 8)
 	if _, err := io.ReadFull(crand.Reader, b); err != nil {
 		panic(err)
@@ -89,13 +91,19 @@ func NewDB(ctx context.Context, t testing.TB) (*DB, error) {
 		Password: cfg.ConnConfig.Password,
 	})
 
-	return &DB{
+	db := &DB{
 		cfg: cfg,
-	}, nil
+	}
+	var err error
+	db.v5cfg, err = v5pool.ParseConfig(db.String())
+	if err != nil {
+		return nil, err
+	}
+	return db, nil
 }
 
-func configureDatabase(ctx context.Context, t testing.TB, root *pgxpool.Config, database, role string) *pgxpool.Config {
-	var cfg *pgxpool.Config
+func configureDatabase(ctx context.Context, t testing.TB, root *v4pool.Config, database, role string) *v4pool.Config {
+	var cfg *v4pool.Config
 	// First, connect as the superuser to create the new database and role.
 	cfg = root.Copy()
 	cfg.ConnConfig.Logger = testingadapter.NewLogger(t)
@@ -178,7 +186,8 @@ func configureDatabase(ctx context.Context, t testing.TB, root *pgxpool.Config, 
 //
 // [auto_explain documentation]: https://www.postgresql.org/docs/current/auto-explain.html
 type DB struct {
-	cfg    *pgxpool.Config
+	cfg    *v4pool.Config
+	v5cfg  *v5pool.Config
 	noDrop bool
 }
 
@@ -193,8 +202,13 @@ func (db *DB) String() string {
 }
 
 // Config returns a pgxpool.Config for the test database.
-func (db *DB) Config() *pgxpool.Config {
+func (db *DB) Config() *v4pool.Config {
 	return db.cfg.Copy()
+}
+
+// V5Config returns a pgxpool.Config for the test database.
+func (db *DB) V5Config() *v5pool.Config {
+	return db.v5cfg.Copy()
 }
 
 // Close tears down the created database.
@@ -238,7 +252,7 @@ func NeedDB(t testing.TB) {
 	if externalDB {
 		t.Log("using preconfigured external database")
 		up.Do(func() {
-			cfg, err := pgxpool.ParseConfig(os.Getenv(EnvPGConnString))
+			cfg, err := v4pool.ParseConfig(os.Getenv(EnvPGConnString))
 			if err != nil {
 				t.Fatal(err)
 			}

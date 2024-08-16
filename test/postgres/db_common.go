@@ -10,42 +10,12 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/jackc/pgx/v4"
-	"github.com/jackc/pgx/v4/log/testingadapter"
-	"github.com/jackc/pgx/v4/pgxpool"
-	"github.com/jackc/pgx/v4/stdlib"
-	"github.com/remind101/migrate"
-
-	"github.com/quay/claircore/datastore/postgres/migrations"
-	"github.com/quay/claircore/test/integration"
+	v4pool "github.com/jackc/pgx/v4/pgxpool"
+	v5pool "github.com/jackc/pgx/v5/pgxpool"
 )
 
 // MinVersion is minimum needed PostgreSQL version, in the integer format.
 const MinVersion uint64 = 150000
-
-// TestMatcherDB returns a [pgxpool.Pool] connected to a started and configured
-// for a Matcher database.
-//
-// If any errors are encountered, the test is failed and exited.
-func TestMatcherDB(ctx context.Context, t testing.TB) *pgxpool.Pool {
-	return testDB(ctx, t, dbMatcher)
-}
-
-// TestIndexerDB returns a [pgxpool.Pool] connected to a started and configured
-// for a Indexer database.
-//
-// If any errors are encountered, the test is failed and exited.
-func TestIndexerDB(ctx context.Context, t testing.TB) *pgxpool.Pool {
-	return testDB(ctx, t, dbIndexer)
-}
-
-// TestDB returns a [pgxpool.Pool] connected to a started and configured
-// database that has not had any migrations run.
-//
-// If any errors are encountered, the test is failed and exited.
-func TestDB(ctx context.Context, t testing.TB) *pgxpool.Pool {
-	return testDB(ctx, t, dbNone)
-}
 
 type dbFlavor uint
 
@@ -55,56 +25,44 @@ const (
 	dbIndexer
 )
 
-func testDB(ctx context.Context, t testing.TB, which dbFlavor) *pgxpool.Pool {
+// TODO(hank) refactor all these helpers to just work on a single connection.
+
+type (
+	poolv4Func[R any] func(context.Context, testing.TB, *v4pool.Pool) R
+	poolv5Func[R any] func(context.Context, testing.TB, *v5pool.Pool) R
+)
+
+// PoolVerisonSwitch is a bad (only) way to do a sum type.
+func poolVersionSwitch[p anyPool, R any](ctx context.Context, t testing.TB, pool p, v4 poolv4Func[R], v5 poolv5Func[R]) R {
 	t.Helper()
-	db, err := integration.NewDB(ctx, t)
-	if err != nil {
-		t.Fatalf("unable to create test database: %v", err)
-	}
-	cfg := db.Config()
-	cfg.ConnConfig.LogLevel = pgx.LogLevelError
-	cfg.ConnConfig.Logger = testingadapter.NewLogger(t)
-	pool, err := pgxpool.ConnectConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("failed to connect: %v", err)
-	}
-	checkVersion(ctx, t, pool)
-
-	mdb := stdlib.OpenDB(*cfg.ConnConfig)
-	defer mdb.Close()
-	// run migrations
-	migrator := migrate.NewPostgresMigrator(mdb)
-	switch which {
-	case dbMatcher:
-		migrator.Table = migrations.MatcherMigrationTable
-		err = migrator.Exec(migrate.Up, migrations.MatcherMigrations...)
-	case dbIndexer:
-		migrator.Table = migrations.IndexerMigrationTable
-		err = migrator.Exec(migrate.Up, migrations.IndexerMigrations...)
-	case dbNone:
+	switch p := any(pool).(type) {
+	case *v4pool.Pool:
+		return v4(ctx, t, p)
+	case *v5pool.Pool:
+		return v5(ctx, t, p)
 	default:
-		err = fmt.Errorf("unknown flavor: %v", which)
+		t.Fatalf("unexpected type passed in: %T", pool)
 	}
-	if err != nil {
-		t.Fatalf("failed to perform migrations: %v", err)
-	}
-	loadHelpers(ctx, t, pool, which)
-
-	// BUG(hank) The Test*DB functions close over the passed-in Context and use
-	// it for the Cleanup method. Because Cleanup functions are earlier in the
-	// stack than any defers inside the test, make sure the Context isn't one
-	// that's deferred to be canceled.
-	t.Cleanup(func() {
-		pool.Close()
-		db.Close(ctx, t)
-	})
-	return pool
+	panic("unreachable")
 }
 
-func checkVersion(ctx context.Context, t testing.TB, pool *pgxpool.Pool) {
+type anyPool interface {
+	*v4pool.Pool | *v5pool.Pool
+}
+
+func checkVersion[p anyPool](ctx context.Context, t testing.TB, pool p) {
 	t.Helper()
 	var vs string
-	err := pool.QueryRow(ctx, `SELECT current_setting('server_version_num');`).Scan(&vs)
+
+	const query = `SELECT current_setting('server_version_num');`
+	err := poolVersionSwitch(ctx, t, pool,
+		func(ctx context.Context, t testing.TB, pool *v4pool.Pool) error {
+			return pool.QueryRow(ctx, `SELECT current_setting('server_version_num');`).Scan(&vs)
+		},
+		func(ctx context.Context, t testing.TB, pool *v5pool.Pool) error {
+			return pool.QueryRow(ctx, `SELECT current_setting('server_version_num');`).Scan(&vs)
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +83,7 @@ var extraSQL embed.FS
 // the test package's "testdata" directory.
 //
 // The "flavor" argument selects which prefix is added onto the file glob.
-func loadHelpers(ctx context.Context, t testing.TB, pool *pgxpool.Pool, flavor dbFlavor) {
+func loadHelpers[p anyPool](ctx context.Context, t testing.TB, pool p, flavor dbFlavor) {
 	t.Helper()
 	logprefix := [...]string{"global", "local"}
 	var look []fs.FS
@@ -142,11 +100,40 @@ func loadHelpers(ctx context.Context, t testing.TB, pool *pgxpool.Pool, flavor d
 		look = append(look, sys)
 	}
 
-	conn, err := pool.Acquire(ctx)
+	var exec func(context.Context, testing.TB, []byte)
+	var done func()
+	err := poolVersionSwitch(ctx, t, pool,
+		func(ctx context.Context, t testing.TB, pool *v4pool.Pool) error {
+			conn, err := pool.Acquire(ctx)
+			if err != nil {
+				return err
+			}
+			done = conn.Release
+			exec = func(ctx context.Context, t testing.TB, b []byte) {
+				if _, err := conn.Exec(ctx, string(b)); err != nil {
+					t.Error(err)
+				}
+			}
+			return nil
+		},
+		func(ctx context.Context, t testing.TB, pool *v5pool.Pool) error {
+			conn, err := pool.Acquire(ctx)
+			if err != nil {
+				return err
+			}
+			done = conn.Release
+			exec = func(ctx context.Context, t testing.TB, b []byte) {
+				if _, err := conn.Exec(ctx, string(b)); err != nil {
+					t.Error(err)
+				}
+			}
+			return nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("unable to acquire connection: %v", err)
 	}
-	defer conn.Release()
+	defer done()
 	glob := []string{"all_*.psql"}
 	switch flavor {
 	case dbMatcher:
@@ -167,9 +154,7 @@ func loadHelpers(ctx context.Context, t testing.TB, pool *pgxpool.Pool, flavor d
 					continue
 				}
 				t.Logf("loading %s %q", logprefix[i], path.Base(f))
-				if _, err := conn.Exec(ctx, string(b)); err != nil {
-					t.Error(err)
-				}
+				exec(ctx, t, b)
 			}
 		}
 	}
