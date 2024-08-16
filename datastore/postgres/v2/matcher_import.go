@@ -1,248 +1,115 @@
-//go:build skip
-
 package postgres
 
 import (
 	"context"
 	"iter"
-	"regexp"
-	"time"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/quay/claircore/updater/driver/v1"
+
+	"github.com/quay/claircore/updater/driver/v2"
 )
 
+// AdvisorySource is a [pgx.CopyFromSource] for an [AddSeq].
 type advisorySource struct {
-	next func() (driver.Vulnerability, error, bool)
+	next func() (driver.NamespacedAdvisory[driver.Advisory], error, bool)
 	stop func()
+	// This is not idiomatic, but we don't control the [pgx.CopyFromSource] API
+	// and need a [context.Context] in the [Values] method.
+	ctx context.Context
 
-	v   driver.Vulnerability
 	err error
+	adv driver.Advisory
 }
 
 var _ pgx.CopyFromSource = (*advisorySource)(nil)
 
-func advisoryCopySource(ctx context.Context, vs iter.Seq2[driver.Vulnerability, error]) *advisorySource {
+func advisoryCopySource(ctx context.Context, vs AddSeq) *advisorySource {
 	next, stop := iter.Pull2(vs)
 	src := &advisorySource{
 		next: next,
 		stop: stop,
+		ctx:  ctx,
 	}
 	return src
 }
 
 func (src *advisorySource) Names() []string {
-	return advisorySourceNames
+	return []string{"advisory", "reference", "package", "attr"}
 }
-
-/*
-CREATE TYPE advisory_import_row AS (
-	-- id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-	advisory_id BIGINT,
-	advisory matcher_v2_import.advisory,
-	reference matcher_v2_import.reference[],
-	package matcher_v2_import.package[],
-	attr matcher_v2_import.attr[]
-);
-*/
-
-var (
-	advisorySourceNames = []string{
-		"advisory",
-		"reference",
-		"package",
-		"attr",
-	}
-
-	advisorySourceOrd = struct {
-		Advisory  int
-		Reference int
-		Package   int
-		Attr      int
-	}{
-		0, 1, 2, 3,
-	}
-)
-
-var onlyDigit = regexp.MustCompile(`^\d+$`)
-
-/*
-func formatRange(r *driver.Range) (string, error) {
-	var b strings.Builder
-	char := []byte{0x00, '[', '(', ']', ')'}
-	endpt := func(e driver.RangeEndpoint, lower bool) {
-		i := e.Bound
-		if !lower {
-			i += 2
-		}
-		b.WriteByte(char[i])
-	}
-	fmtval := func(e driver.RangeEndpoint) error {
-		const strdelim = `$v$`
-		b.WriteByte('{')
-		for _, s := range e.Value {
-			if onlyDigit.MatchString(s) {
-				i, err := strconv.Atoi(s)
-				if err != nil {
-					return err
-				}
-				fmt.Fprintf(&b, "'%010d'", i)
-				continue
-			} else {
-				b.WriteString(strdelim)
-				b.WriteString(s)
-				b.WriteString(strdelim)
-			}
-			b.WriteByte(',')
-		}
-		b.WriteString("NULL}")
-		return nil
-	}
-
-	endpt(r.Lower, true)
-	if err := fmtval(r.Lower); err != nil {
-		return "", err
-	}
-	b.WriteByte(',')
-	if err := fmtval(r.Upper); err != nil {
-		return "", err
-	}
-	endpt(r.Upper, false)
-	return b.String(), nil
-}
-*/
 
 func (src *advisorySource) Next() (ok bool) {
-	src.v, src.err, ok = src.next()
-	return ok && src.err != nil
+	var a driver.NamespacedAdvisory[driver.Advisory]
+	a, src.err, ok = src.next()
+	if src.err == nil {
+		src.adv = a.Advisory
+	}
+	return ok && src.err == nil
 }
 
-func (src *advisorySource) Values() ([]interface{}, error) {
-	ord := advisorySourceOrd
-	row := make([]interface{}, len(advisorySourceNames))
-	row[ord.Advisory] = make([]interface{}, 10)
-	row[ord.Reference] = make([]interface{}, 10)
-	row[ord.Package] = make([]interface{}, 10)
-	row[ord.Attr] = make([]interface{}, 10)
+// TODO(hank) There's probably some memory savings to be had if the accumulator
+// slices were re-used between [Values] calls. If tackling that, make sure to
+// check the contract for the [pgx.Batch] API; I think it eagerly produces the
+// wire format and this optimization is only possible if it does.
 
-	row[ord["name"]] = src.v.Name
-	row[ord["issued"]] = src.v.Issued
-	row[ord["summary"]] = src.v.Summary
-	row[ord["description"]] = src.v.Description
-	row[ord["uri"]] = src.v.URI
-	row[ord["severity"]] = src.v.Severity.Upstream
-	row[ord["normalized_severity"]] = src.v.Severity.Normalized.String()
-	// now, refs:
-	v.Reference(func(r driver.Reference, err error) bool {
-		if err != nil {
-			src.err = err
-			return false
-		}
-		src.row[ord["ref_namespace"]] = append(src.row[ord["ref_namespace"]].([]string), r.Namespace)
-		src.row[ord["ref_name"]] = append(src.row[ord["ref_name"]].([]string), r.Name)
-		src.row[ord["ref_uri"]] = append(src.row[ord["ref_uri"]].([][]string), r.URLs)
-		return true
-	})
-	if src.err != nil {
-		return false
+func (src *advisorySource) Values() ([]any, error) {
+	const (
+		ordAdvisory int = iota
+		ordReference
+		ordPackage
+		ordAttr
+		numCol
+	)
+	row := make([]interface{}, numCol)
+
+	row[ordAdvisory] = &src.adv
+	refs, err := src.adv.Refs(src.ctx)
+	if err != nil {
+		return nil, err
 	}
-	// now, packages:
-	v.Package(func(p driver.Package, err error) bool {
-		if err != nil {
-			src.err = err
-			return false
-		}
-		src.row[ord["pkg_name"]] = append(src.row[ord["pkg_name"]].([]string), p.Name)
-		src.row[ord["pkg_kind"]] = append(src.row[ord["pkg_kind"]].([]string), p.Kind.String())
-		src.row[ord["pkg_arch"]] = append(src.row[ord["pkg_arch"]].([][]string), p.Arch)
-		src.row[ord["pkg_version_kind"]] = append(src.row[ord["pkg_version_kind"]].([]string), p.VersionKind)
-		src.row[ord["pkg_name"]] = append(src.row[ord["pkg_name"]].([]string), p.Name)
-		upst := make([]string, len(p.Version))
-		rng := make([]string, len(p.Version))
-		for _, v := range p.Version {
-			upst = append(upst, v.Upstream)
-			s, err := formatRange(&v)
-			if err != nil {
-				src.err = err
-				return false
-			}
-			rng = append(rng, s)
-		}
-		src.row[ord["pkg_version_upstream"]] = append(src.row[ord["pkg_version_upstream"]].([][]string), upst)
-		src.row[ord["pkg_version_range"]] = append(src.row[ord["pkg_version_range"]].([][]string), rng)
-		return true
-	})
-	if src.err != nil {
-		return false
-	}
-	// now, attrs:
-	v.Attr(func(a driver.Attr, err error) bool {
-		if err != nil {
-			src.err = err
-			return false
-		}
-		src.row[ord["attr_mediatype"]] = append(src.row[ord["attr_mediatype"]].([]string), a.Kind)
-		if len(a.Data) == 0 {
-			src.row[ord["attr_data"]] = append(src.row[ord["attr_data"]].([][]byte), nil)
-		} else {
-			src.row[ord["attr_data"]] = append(src.row[ord["attr_data"]].([][]byte), a.Data)
-		}
-		return true
-	})
-	if src.err != nil {
-		return false
+	row[ordReference] = slices.Collect(filterErrs(&err, refs))
+	if err != nil {
+		return nil, err
 	}
 
-	return row, src.err
+	pkgs, err := src.adv.Packages(src.ctx)
+	if err != nil {
+		return nil, err
+	}
+	row[ordPackage] = slices.Collect(filterErrs(&err, pkgs))
+	if err != nil {
+		return nil, err
+	}
+
+	attrs, err := src.adv.Attrs(src.ctx)
+	if err != nil {
+		return nil, err
+	}
+	row[ordAttr] = slices.Collect(filterErrs(&err, attrs))
+	if err != nil {
+		return nil, err
+	}
+
+	return row, nil
 }
 
 func (src *advisorySource) Err() error {
-	return src.err
+	if src.err != nil {
+		return src.err
+	}
+	return nil
 }
 
-/*
-CREATE TYPE advisory AS (
-	name TEXT,
-	issued TIMESTAMPTZ,
-	summary TEXT,
-	description TEXT,
-	uri TEXT,
-	severity TEXT,
-	normalized_severity matcher_v2.Severity
-
-);
-*/
-
-type advisory struct {
-	Name               string
-	Issued             time.Time
-	Summary            string
-	Description        string
-	URI                string
-	Severity           string
-	NormalizedSeverity string
+func filterErrs[T any](out *error, seq iter.Seq2[T, error]) iter.Seq[T] {
+	return func(yield func(T) bool) {
+		for v, err := range seq {
+			if err != nil {
+				*out = err
+				return
+			}
+			if !yield(v) {
+				return
+			}
+		}
+	}
 }
-
-/*
-CREATE TYPE reference AS (
-	namespace TEXT,
-	name TEXT,
-	uri TEXT[]
-);
-
-CREATE TYPE package AS (
-	name TEXT,
-	kind matcher_v2.PackageKind,
-	arch matcher_v2.Architecture[],
-	vulnerable_range matcher_v2.VersionMultiRange,
-	version_upstream TEXT[],
-	version_kind TEXT,
-	purl TEXT,
-	cpe TEXT
-);
-
-CREATE TYPE attr AS (
-	mediatype TEXT,
-	data JSONB
-);
-*/

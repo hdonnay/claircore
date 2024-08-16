@@ -2,94 +2,83 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
+	"runtime"
+	"unique"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/quay/claircore/datastore/postgres/v2/internal/cursor"
+	"github.com/quay/claircore/datastore/postgres/v2/internal/ringbuf"
 	"github.com/quay/claircore/updater/driver/v2"
 )
 
-func (u *Matcher) GetUpdateOperations(ctx context.Context, opts ...TODO) iter.Seq2[driver.UpdateOperation, error] {
-	// This function delays all setup until the iterator is used.
-	//
-	// It's possible (although I can't think of a scenario at present) to create
-	// an iterator on the off-chance it'll be needed and only pay the allocation
-	// costs.
-	return func(yield func(driver.UpdateOperation, error) bool) {
-		ctx, span := tracer.Start(ctx, "Matcher.GetUpdateOperations")
-		defer span.End()
+func (u *Matcher) GetUpdateOperations(ctx context.Context, token string) (iter.Seq2[driver.UpdateOperation, error], func() string) {
+	const method = `Matcher.GetUpdateOperations`
 
-		// TODO(hank) Move to embedded SQL.
-		const query = `SELECT "id", "name", "ref", "date", "success", "fingerprint"::BYTEA, "error"
-		FROM updater_v1.run
-			JOIN updater_v1.updater ON updater.id = run.updater
-		WHERE
-			id > $2
-		LIMIT $1
-		ORDER BY (date, id) ASC;`
-
-		// Use a ring buffer to request batches of rows. This is an attempt to
-		// balance network round-trips (and query overhead) with buffering the
-		// entire result set in the process' memory.
-		ring := getRing[driver.UpdateOperation](0)
-		defer putRing(ring)
-		// Pagination token.
-		var last pgtype.Int8
-		// Last database fetch contained the last page of results.
-		done := false
-
-		for {
-			switch {
-			case ring.Empty() && done:
-				return
-			case ring.Empty(): // Pull rows.
-			default:
-				op, _ := ring.Shift()
-				if !yield(op, nil) {
-					return
-				}
-				continue
-			}
-
-			// Use [pgxpool.AcquireFunc] to create a nice, contained scope.
-			err := u.pool.AcquireFunc(ctx, func(c *pgxpool.Conn) error {
-				// TODO(hank) Per-request metrics?
-				rows, err := c.Query(ctx, query, ring.Size(), &last)
-				if err != nil {
-					return err
-				}
-				defer rows.Close()
-				for rows.Next() {
-					op, _ := ring.Alloc()
-					if err := rows.Scan(&last, &op.Updater, &op.Ref, &op.Date, &op.Success, &op.Fingerprint, &op.Error); err != nil {
-						ring.Pop()
-						return err
-					}
-				}
-				// Done if the page was not full.
-				done = !ring.Full()
-				switch err := rows.Err(); {
-				case err == nil:
-				case errors.Is(err, pgx.ErrNoRows):
-					// Empty page; "done" will be set and the switch in the
-					// yield loop will exit the function.
-				default:
-					return err
-				}
-				return nil
-			})
+	fill := func(
+		ctx context.Context,
+		ids *ringbuf.Buf[pgtype.Int8],
+		ring *ringbuf.Buf[driver.UpdateOperation],
+		last pgtype.Int8,
+	) func(*pgxpool.Conn) error {
+		return func(c *pgxpool.Conn) error {
+			ctx, span := tracer.Start(ctx, method+".fill", trace.WithSpanKind(trace.SpanKindInternal))
+			defer span.End()
+			rows, err := c.Query(ctx, matcherGetUpdateOperations, ring.Size(), &last)
 			if err != nil {
-				yield(driver.UpdateOperation{}, err)
-				return
+				return fmt.Errorf("%v: %w", NameLookup[unique.Make(matcherGetUpdateOperations)], err)
 			}
+			defer rows.Close()
+			for rows.Next() {
+				op, _ := ring.Alloc()
+				id, _ := ids.Alloc()
+				var fp []byte
+				if err := rows.Scan(
+					id,
+					&op.Updater,
+					&op.Ref,
+					&op.Date,
+					&op.Success,
+					&fp,
+					&op.Error,
+				); err != nil {
+					ring.Pop()
+					ids.Pop()
+					return err
+				}
+				op.Fingerprint = driver.Fingerprint(fp)
+			}
+			return rows.Err()
 		}
 	}
+	c := cursor.New(fill, token)
+
+	return c.All(ctx, m.pool), c.PaginationToken
+}
+
+func (m *Matcher) UpdatersRun(ctx context.Context, ref uuid.UUID) (*Run, error) {
+	const method = "Matcher.UpdaterRun"
+	r := Run{
+		pool: m.pool,
+		link: trace.LinkFromContext(ctx, attrRunRef.String(ref.String())),
+	}
+	ctx, r.span = tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindInternal), trace.WithLinks(r.link))
+
+	err := m.pool.QueryRow(ctx, matcherCreateRun, ref).Scan(&r.runid)
+	if err != nil {
+		return nil, fmt.Errorf(errPre+`Matcher: unable to create run: %w`, err)
+	}
+
+	_, file, line, _ := runtime.Caller(1)
+	runtime.SetFinalizer(&r, func(r *Run) {
+		panic(fmt.Sprintf("%s:%d: postgres/v2.UpdaterRun not closed", file, line))
+	})
+	return &r, nil
 }
 
 // Some type aliases to make the signatures shorter.
@@ -98,177 +87,29 @@ type (
 	RemSeq = iter.Seq2[driver.NamespacedAdvisory[driver.AdvisoryName], error]
 )
 
-func (m *Matcher) UpdaterRun(ctx context.Context, updater string, ref uuid.UUID) (*UpdaterRun, error) {
-	link := trace.LinkFromContext(ctx, attrRunRef.String(ref.String()))
-	var span trace.Span
-	ctx, span = tracer.Start(ctx, "Matcher.UpdaterRun", trace.WithLinks(link))
+// Run is a single run of all the updaters in the system.
+type Run struct {
+	pool  *pgxpool.Pool
+	span  trace.Span
+	link  trace.Link
+	runid int64
+}
+
+// Complete marks the Run as completed.
+func (r *Run) Complete(ctx context.Context) (err error) {
+	const method = "Matcher.Complete"
+	ctx, span := tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindInternal), trace.WithLinks(r.link))
 	defer span.End()
-
-	const query = `WITH
-	u AS (SELECT id FROM updater_v1.updater WHERE name = $2)
-	INSERT INTO updater_v1.run (ref, updater, fingerprint) VALUES ($1, u.id, $3::jsonb) RETURNING id;`
-
-	var runid int64
-	err := m.pool.QueryRow(ctx, query, ref, updater, nil).Scan(&runid)
-	if err != nil {
-		return nil, fmt.Errorf(`postgres/v2: Matcher: unable to create run: %w`, err)
-	}
-
-	return &UpdaterRun{
-		pool: m.pool,
-		link: link,
-	}, nil
+	_, err = r.pool.Exec(ctx, matcherCompleteRun, r.runid)
+	return err
 }
 
-type UpdaterRun struct {
-	pool *pgxpool.Pool
-	link trace.Link
-}
-
-func (r *UpdaterRun) NewSnapshot(ctx context.Context, ref uuid.UUID, updater string, fp driver.Fingerprint) (*UpdaterSnapshotRun, error) {
-	link := trace.LinkFromContext(ctx, attrUpdRunName.String(updater), attrUpdRunRef.String(ref.String()))
-	var span trace.Span
-	ctx, span = tracer.Start(ctx, "UpdaterRun.NewSnapshot", trace.WithLinks(r.link))
-	defer span.End()
-
-	conn, err := r.pool.Acquire(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	return &UpdaterSnapshotRun{
-		link: []trace.Link{r.link, link},
-		conn: conn,
-	}, nil
-}
-
-func (r *UpdaterRun) NewDelta(ctx context.Context, ref uuid.UUID, updater string, fp driver.Fingerprint) (*UpdaterDeltaRun, error) {
-	link := trace.LinkFromContext(ctx, attrUpdRunName.String(updater), attrUpdRunRef.String(ref.String()))
-	var span trace.Span
-	ctx, span = tracer.Start(ctx, "UpdaterRun.NewDelta", trace.WithLinks(r.link))
-	defer span.End()
-
-	conn, err := r.pool.Acquire(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	return &UpdaterDeltaRun{
-		link: []trace.Link{r.link, link},
-		conn: conn,
-	}, nil
-}
-
-func (r *UpdaterRun) Close() error {
-	return nil
-}
-
-type UpdaterDeltaRun struct {
-	conn *pgxpool.Conn
-	err  error
-	link []trace.Link
-
-	id  int64
-	gen int64
-}
-
-func (u *UpdaterDeltaRun) Add(ctx context.Context, vs AddSeq) error {
-	var span trace.Span
-	ctx, span = tracer.Start(ctx, "UpdaterDeltaRun.Add", trace.WithLinks(u.link...))
-	defer span.End()
-
-	return nil
-}
-
-func (u *UpdaterDeltaRun) Remove(ctx context.Context, vs RemSeq) error {
-	var span trace.Span
-	ctx, span = tracer.Start(ctx, "UpdaterDeltaRun.Remove", trace.WithLinks(u.link...))
-	defer span.End()
-
-	return nil
-}
-
-func (u *UpdaterDeltaRun) Close(ctx context.Context) error {
-	var span trace.Span
-	ctx, span = tracer.Start(ctx, "UpdaterDeltaRun.Close", trace.WithLinks(u.link...))
-	defer span.End()
-	defer u.conn.Release()
-	// Flush/merge?
-	if u.err != nil {
-		// TODO(hank) embed
-		const markError = `UPDATE matcher_v2.updater_run SET error = $2 WHERE id = $1`
-		tag, err := u.conn.Exec(ctx, markError, u.id, u.err.Error())
-		_ = tag // TODO(hank) Metrics
-
-		return errors.Join(err, u.err)
-	}
-
-	return nil
-}
-
-type UpdaterSnapshotRun struct {
-	conn *pgxpool.Conn
-	err  error
-	link []trace.Link
-
-	id  int64
-	gen int64
-}
-
-func (u *UpdaterSnapshotRun) Previous(ctx context.Context) (driver.UpdateOperation, bool, error) {
-	var span trace.Span
-	ctx, span = tracer.Start(ctx, "UpdaterSnapshotRun.Previous", trace.WithLinks(u.link...))
-	defer span.End()
-
-	var op driver.UpdateOperation
-	return op, false, nil
-}
-
-func (u *UpdaterSnapshotRun) Set(ctx context.Context, vs AddSeq) error {
-	var span trace.Span
-	ctx, span = tracer.Start(ctx, "UpdaterSnapshotRun.Set", trace.WithLinks(u.link...))
-	defer span.End()
-
-	opts := pgx.TxOptions{}
-
-	err := beginTxFunc(ctx, u.conn, opts, func(ctx context.Context, tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `CREATE TEMPORARY TABLE UNLOGGED advisory_import LIKE matcher_v2.advisory_import_template ON COMMIT DROP;`)
-		_ = tag // TODO(hank) Metrics
-		if err != nil {
-			return err
-		}
-		src := advisoryMetaCopySource(vs)
-		// src := advisoryCopySource(ctx, vs)
-		ct, err := tx.CopyFrom(ctx, pgx.Identifier{"advisory_import"}, []string{}, src)
-		_ = ct // TODO(hank) Metrics
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (u *UpdaterSnapshotRun) Close(ctx context.Context) error {
-	var span trace.Span
-	ctx, span = tracer.Start(ctx, "UpdaterSnapshotRun.Close", trace.WithLinks(u.link...))
-	defer span.End()
-	defer u.conn.Release()
-	// Flush/merge?
-	if u.err != nil {
-		// TODO(hank) embed
-		const markError = `UPDATE matcher_v2.updater_run SET error = $2 WHERE id = $1`
-		tag, err := u.conn.Exec(ctx, markError, u.id, u.err.Error())
-		_ = tag // TODO(hank) Metrics
-
-		return errors.Join(err, u.err)
-	}
-
+// Close releases resources associated with the Run.
+func (r *Run) Close() error {
+	r.span.End()
+	runtime.SetFinalizer(r, nil)
+	r.pool = nil
+	r.runid = -1
 	return nil
 }
 

@@ -1,0 +1,37 @@
+CREATE OR REPLACE PROCEDURE make_run (TEXT[])
+LANGUAGE SQL
+BEGIN ATOMIC
+	WITH run AS (
+		INSERT INTO matcher_v2.run (ref, complete)
+			VALUES (gen_random_uuid (), TRUE)
+		RETURNING id
+	), upd AS (
+		SELECT
+			id
+		FROM
+			matcher_v2.updater
+		WHERE
+			name = ANY($1)
+	)
+	INSERT INTO matcher_v2.updater_run (ref, updater, run, fingerprint, error)
+		SELECT gen_random_uuid (), upd.id, run.id, '{}', NULL FROM run, upd;
+END;
+
+CREATE OR REPLACE PROCEDURE create_updates(ct INTEGER)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+	i INTEGER;
+	runid INTEGER;
+	updid INTEGER;
+BEGIN
+	INSERT INTO matcher_v2.run (ref, complete)
+			VALUES (gen_random_uuid (), TRUE)
+		RETURNING id INTO runid;
+	FOR i IN 1 .. ct LOOP
+		SELECT matcher_v2.updater_id('test.' || to_char(i, 'FM00')) INTO updid;
+		INSERT INTO matcher_v2.updater_run (ref, updater, run, fingerprint, error)
+			SELECT gen_random_uuid (), updid, runid, '{}', NULL;
+	END LOOP;
+END;
+$$;

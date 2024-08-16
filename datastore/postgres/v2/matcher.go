@@ -2,53 +2,65 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/quay/zlog"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/quay/claircore/datastore/postgres/migrations"
+	"github.com/quay/claircore/datastore/postgres/v2/internal/o11y"
 	"github.com/quay/claircore/updater/driver/v2"
 )
 
 type Matcher struct {
 	pool *pgxpool.Pool
 
+	reg     metric.Registration
 	queries map[string]struct{}
-	workMem int
+	// TODO(hank) Do something smart with this.
+	workMem int64
 }
 
 const minMatcherMigration = 13
 
 func NewMatcherV2(ctx context.Context, matcher *pgxpool.Pool) (*Matcher, error) {
-	var workMem int
-	err := matcher.AcquireFunc(ctx, func(conn *pgxpool.Conn) error {
-		var version int
-		q := fmt.Sprintf(`SELECT MAX(version) FROM %s;`, pgx.Identifier{migrations.MatcherMigrationTable})
-		if err := conn.QueryRow(ctx, q).Scan(&version); err != nil {
-			return fmt.Errorf("postgres: unable to determine version: %w", err)
-		}
-		if got, want := version, minMatcherMigration; got < want {
-			return fmt.Errorf("postgres: matcher database version too low: %d < %d (do you need to run migrations?)", got, want)
-		}
-		const selectWorkMem = `SELECT setting FROM pg_settings WHERE name = 'work_mem';`
-		if err := conn.QueryRow(ctx, selectWorkMem).Scan(&workMem); err != nil {
-			return fmt.Errorf("postgres: unable to determine work_mem: %w", err)
-		}
-		return nil
-	})
+	reg, err := o11y.CollectStats(matcher)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(errPre+"unable to register metrics collection: %w", err)
 	}
-	u := Matcher{
+	var ok bool
+	defer func() {
+		if !ok {
+			reg.Unregister()
+		}
+	}()
+	m := Matcher{
 		pool:    matcher,
+		reg:     reg,
 		queries: make(map[string]struct{}),
-		workMem: workMem,
 	}
-	return &u, nil
+
+	err = matcher.AcquireFunc(ctx, sanityCheck(ctx, &m.workMem, migrations.MatcherMigrationTable, minMatcherMigration))
+	if err != nil {
+		return nil, fmt.Errorf(errPre+"%w", err)
+	}
+
+	_, file, line, _ := runtime.Caller(1)
+	runtime.SetFinalizer(&m, func(m *Matcher) {
+		panic(fmt.Sprintf("%s:%d: postgres/v2.Matcher not closed", file, line))
+	})
+	ok = true
+	return &m, nil
+}
+
+func (m *Matcher) Close() error {
+	runtime.SetFinalizer(m, nil)
+	return m.reg.Unregister()
 }
 
 // var _ datastore.UpdaterNG = (*MatcherV2)(nil)
@@ -76,13 +88,17 @@ WITH work_set AS (SELECT id, updater FROM updater_v1.run WHERE run.date < (now()
 	})
 }
 
-func (u *Matcher) Initialized(ctx context.Context, expr string) (bool, error) {
-	var out bool
-	return out, u.pool.AcquireFunc(ctx, func(c *pgxpool.Conn) error {
-		// TODO(hank) Move to embed.
-		const query = `SELECT NOT EXISTS(SELECT updater.name FROM updater LEFT OUTER JOIN (SELECT updater, bool_or(success) AS success FROM run GROUP BY updater) AS run ON updater.id = run.updater WHERE updater.name ~ $1::lquery AND run.success = FALSE);`
-		return c.QueryRow(ctx, query, expr).Scan(&out)
-	})
+// Initialized reports if any [Run] has completed.
+//
+// If "strict" is true, the method reports if the latest completed run finished
+// without errors and with the currently configured set of Updaters.
+func (u *Matcher) Initialized(ctx context.Context, strict bool) (out bool, err error) {
+	if strict {
+		return false, errors.ErrUnsupported
+	}
+	return out, u.pool.
+		QueryRow(ctx, matcherInitialized).
+		Scan(&out)
 }
 
 func (u *Matcher) GetUpdateDiff(ctx context.Context, prev, cur uuid.UUID) (*driver.UpdateDiff, error) {
