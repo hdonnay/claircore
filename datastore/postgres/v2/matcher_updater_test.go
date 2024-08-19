@@ -9,6 +9,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/quay/zlog"
@@ -77,6 +78,10 @@ func (*matcherSuite) Updater(ctx context.Context, t *testing.T, pool *pgxpool.Po
 			seq, _ := m.GetUpdateOperations(ctx, "")
 			got := slices.Collect(catchErrs(t, seq))
 			t.Logf("got:\n%#v", got)
+			want := []driver.UpdateOperation{}
+			if !cmp.Equal(got, want) {
+				t.Fatal(cmp.Diff(got, want))
+			}
 		})
 	})
 }
@@ -120,9 +125,13 @@ func loadJSONSeq[T any](t *testing.T, filename string, mod func(*testing.T, *T, 
 		}()
 		for s.Scan() {
 			var ret T
-			err := json.Unmarshal(s.Bytes(), &ret)
+			b := s.Bytes()
+			if len(b) == 0 {
+				return
+			}
+			err := json.Unmarshal(b, &ret)
 			if mod != nil {
-				mod(t, &ret, s.Bytes())
+				mod(t, &ret, b)
 			}
 			if !yield(ret, err) {
 				return

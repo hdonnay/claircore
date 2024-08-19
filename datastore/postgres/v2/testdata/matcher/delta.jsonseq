@@ -1,0 +1,40 @@
+{
+  "Updater": "test-updater-delta",
+  "Advisory": {
+    "Issued": "2024-08-19T19:45:37Z",
+    "Name": "TEST-001",
+    "Summary": "Test advisory",
+    "Description": "An advisory for testing the system",
+    "URI": "http://example.com",
+    "Severity": {
+      "Upstream": "important",
+      "Normalized": "High"
+    }
+  },
+  "Refs": [
+    {
+      "Namespace": "CVE",
+      "Name": "1992-001"
+    }
+  ]
+}
+{
+  "Updater": "test-updater-delta",
+  "Advisory": {
+    "Issued": "2024-08-19T19:45:37Z",
+    "Name": "TEST-002",
+    "Summary": "Test advisory",
+    "Description": "An advisory for testing the system",
+    "URI": "http://example.com",
+    "Severity": {
+      "Upstream": "important",
+      "Normalized": "High"
+    }
+  },
+  "Refs": [
+    {
+      "Namespace": "CVE",
+      "Name": "1992-001"
+    }
+  ]
+}
