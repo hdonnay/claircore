@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/quay/claircore/updater/driver/v2"
+	"github.com/quay/zlog"
 )
 
 // UpdaterDeltaRun is a single updater doing a delta update.
@@ -29,9 +30,10 @@ type UpdaterDeltaRun struct {
 	span trace.Span
 	link []trace.Link
 
-	runID     int64
-	updaterID int64
-	updRunID  int64
+	updaterName string
+	runID       int64
+	updaterID   int64
+	updRunID    int64
 }
 
 // NewDelta starts a "delta" updater run.
@@ -41,7 +43,8 @@ type UpdaterDeltaRun struct {
 func (r *Run) NewDelta(ctx context.Context, ref uuid.UUID, updater string) (*UpdaterDeltaRun, error) {
 	const method = `Run.NewDelta`
 	u := UpdaterDeltaRun{
-		runID: r.runid,
+		runID:       r.runid,
+		updaterName: updater,
 	}
 	ctx, u.span = tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindInternal), trace.WithLinks(r.link))
 	u.link = []trace.Link{
@@ -72,12 +75,12 @@ func (r *Run) NewDelta(ctx context.Context, ref uuid.UUID, updater string) (*Upd
 		err = tx.QueryRow(ctx, matcherGetUpdaterID, updater).
 			Scan(&u.updaterID)
 		if err != nil {
-			return err
+			return fmt.Errorf("updater ID: %w", err)
 		}
 		err = tx.QueryRow(ctx, matcherCreateUpdaterRun, ref, u.updaterID, u.runID).
 			Scan(&u.updRunID)
 		if err != nil {
-			return err
+			return fmt.Errorf("updater_run ID: %w", err)
 		}
 		return nil
 	})
@@ -119,17 +122,18 @@ func (u *UpdaterDeltaRun) Add(ctx context.Context, vs AddSeq) (err error) {
 		span.End()
 	}()
 
-	for adv, e := range vs {
-		if e != nil {
-			err = fmt.Errorf(errPre+method+": %w", e)
-			return err
-		}
-		_ = adv
-		// INSERT INTO advisory_import ...
+	src := advisoryCopySource(ctx, vs)
+	ct, err := u.tx.CopyFrom(ctx, pgx.Identifier{`advisory_import`}, src.Names(), src)
+	if err != nil {
+		return fmt.Errorf(errPre+method+": %w", err)
 	}
+	zlog.Debug(ctx).
+		Int64("count", ct).
+		Msg("copied delta additions")
 
 	var tag pgconn.CommandTag
-	tag, err = u.tx.Exec(ctx, `CALL matcher_v2_import.commit_add();`)
+	// TODO(hank) move to embed
+	tag, err = u.tx.Exec(ctx, `CALL matcher_v2_import.commit_add($1,$2,$3);`, u.runID, u.updaterID, u.updRunID)
 	// TODO(hank) Metrics
 	_ = tag
 	if err != nil {
@@ -179,6 +183,14 @@ func (u *UpdaterDeltaRun) Finish(ctx context.Context, fp driver.Fingerprint) err
 	const method = `UpdaterDeltaRun.Finish`
 	ctx, span := tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindInternal), trace.WithLinks(u.link...))
 	defer span.End()
+	defer func() { u.tx = nil }()
+	switch s := u.tx.Conn().PgConn().TxStatus(); s {
+	case 'E':
+		return u.tx.Rollback(ctx)
+	case 'T':
+	default:
+		return fmt.Errorf(errPre+method+": unknown tx status: %c", s)
+	}
 
 	errs := make([]error, 2)
 	_, errs[0] = u.tx.Exec(ctx, `SELECT matcher_v2_import.finish_updater_run($1::BIGINT, $2::JSONB, $3::TEXT);`, u.updRunID, fp, u.err)
@@ -187,7 +199,6 @@ func (u *UpdaterDeltaRun) Finish(ctx context.Context, fp driver.Fingerprint) err
 	} else {
 		errs[1] = u.tx.Commit(ctx)
 	}
-	u.tx = nil
 	return errors.Join(errs...)
 }
 
