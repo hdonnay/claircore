@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"regexp"
@@ -103,6 +104,21 @@ func mkMatcher(ctx context.Context, t *testing.T, pool *pgxpool.Pool) *Matcher {
 		}
 	})
 	return m
+}
+
+func okAndCleanup[C io.Closer](t *testing.T) func(C, error) C {
+	t.Helper()
+	return func(c C, err error) C {
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := c.Close(); err != nil {
+				t.Errorf("cleaning up %T: %v", c, err)
+			}
+		})
+		return c
+	}
 }
 
 func countTable(ctx context.Context, t *testing.T, pool *pgxpool.Pool, schema string, ts ...string) {
