@@ -1,6 +1,6 @@
 SELECT
-	setting
+  setting
 FROM
-	pg_settings
+  pg_settings
 WHERE
-	name = 'work_mem';
+  name = 'work_mem';

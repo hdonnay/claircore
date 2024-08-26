@@ -1,6 +1,5 @@
-UPDATE
-	matcher_v2.updater_run
+UPDATE matcher_v2.updater_run
 SET
-	error = $2
+  error = $2
 WHERE
-	id = $1;
+  id = $1;
