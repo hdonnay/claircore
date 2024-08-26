@@ -188,6 +188,9 @@ func cmpIndexRecord(a, b *claircore.IndexRecord) int {
 // SplitJSONSeq is a [bufio.SplitFunc] that splits "application/json-seq"
 // streams.
 func SplitJSONSeq(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if len(data) == 0 && atEOF {
+		return 0, []byte{}, bufio.ErrFinalToken
+	}
 	intra := []byte{'\n', '\x1e'}
 	if data[0] != intra[1] {
 		return 0, nil, fmt.Errorf("format botch: expected %q, found %q", intra[1], data[0])
