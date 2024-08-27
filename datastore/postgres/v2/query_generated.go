@@ -47,3 +47,34 @@ var NameLookup = map[unique.Handle[string]]string{
 	unique.Make(matcherInitialized):         "Initialized",
 	unique.Make(matcherMarkUpdaterError):    "MarkUpdaterError",
 }
+
+// TableLookup maps interned SQL text back to the "main" table affected by the
+// query.
+var TableLookup = map[unique.Handle[string]]string{
+	unique.Make(initSelectVersion):      "libvuln_migrations",
+	unique.Make(initSelectWorkMem):      "pg_settings",
+	unique.Make(matcherBeginUpdaterRun): "updater_v1.run",
+	// matcherCompleteRun: no obvious table
+	// matcherCreateRun: no obvious table
+	// matcherCreateUpdaterRun: no obvious table
+	unique.Make(matcherGetAdvisories):       "updater_v1.run",
+	unique.Make(matcherGetUpdateOperations): "matcher_v2.run",
+	// matcherGetUpdaterID: no obvious table
+	unique.Make(matcherInitialized):      "matcher_v2.run",
+	unique.Make(matcherMarkUpdaterError): "matcher_v2.updater_run",
+}
+
+// OpLookup maps interned SQL text back to the kind of operation it is.
+var OpLookup = map[unique.Handle[string]]string{
+	unique.Make(initSelectVersion):          "SELECT",
+	unique.Make(initSelectWorkMem):          "SELECT",
+	unique.Make(matcherBeginUpdaterRun):     "INSERT",
+	unique.Make(matcherCompleteRun):         "SELECT",
+	unique.Make(matcherCreateRun):           "SELECT",
+	unique.Make(matcherCreateUpdaterRun):    "SELECT",
+	unique.Make(matcherGetAdvisories):       "SELECT",
+	unique.Make(matcherGetUpdateOperations): "SELECT",
+	unique.Make(matcherGetUpdaterID):        "SELECT",
+	unique.Make(matcherInitialized):         "SELECT",
+	unique.Make(matcherMarkUpdaterError):    "UPDATE",
+}
