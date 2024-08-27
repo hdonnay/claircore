@@ -18,6 +18,7 @@ require (
 	github.com/knqyf263/go-deb-version v0.0.0-20190517075300-09fca494f03d
 	github.com/knqyf263/go-rpm-version v0.0.0-20170716094938-74609b86c936
 	github.com/package-url/packageurl-go v0.1.3
+	github.com/pganalyze/pg_query_go/v5 v5.1.0
 	github.com/prometheus/client_golang v1.22.0
 	github.com/quay/claircore/toolkit v1.2.4
 	github.com/quay/goval-parser v0.8.8
@@ -27,6 +28,7 @@ require (
 	github.com/spdx/tools-golang v0.5.5
 	github.com/sqids/sqids-go v0.4.1
 	github.com/ulikunitz/xz v0.5.11
+	github.com/wasilibs/go-pgquery v0.0.0-20240826014338-9ea9e19d01fd
 	go.opentelemetry.io/otel v1.35.0
 	go.opentelemetry.io/otel/metric v1.35.0
 	go.opentelemetry.io/otel/trace v1.35.0
@@ -64,6 +66,8 @@ require (
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/tetratelabs/wazero v1.8.0 // indirect
+	github.com/wasilibs/wazero-helpers v0.0.0-20240604052452-61d7981e9a38 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
 	golang.org/x/mod v0.24.0 // indirect
