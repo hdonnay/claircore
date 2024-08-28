@@ -8,8 +8,10 @@ import (
 	"os"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/quay/zlog"
@@ -25,6 +27,10 @@ func (*matcherSuite) Updater(ctx context.Context, t *testing.T, pool *pgxpool.Po
 	var (
 		runRef   = uuid.MustParse(`0e9f9c9f-c11a-486f-9d11-99c7de4d62b5`)
 		deltaRef = uuid.MustParse(`806e02ea-758f-4aa7-a177-c8b3ff391ffc`)
+
+		cmpOpts = cmp.Options{
+			cmpopts.EquateApproxTime(time.Minute),
+		}
 	)
 
 	addAdvisories := func(t *testing.T, adv *driver.NamespacedAdvisory[driver.Advisory], b []byte) {
@@ -78,9 +84,17 @@ func (*matcherSuite) Updater(ctx context.Context, t *testing.T, pool *pgxpool.Po
 			seq, _ := m.GetUpdateOperations(ctx, "")
 			got := slices.Collect(catchErrs(t, seq))
 			t.Logf("got:\n%#v", got)
-			want := []driver.UpdateOperation{}
-			if !cmp.Equal(got, want) {
-				t.Fatal(cmp.Diff(got, want))
+			want := []driver.UpdateOperation{
+				{
+					Date:        time.Now(),
+					Updater:     deltaUpdater,
+					Ref:         deltaRef,
+					Success:     true,
+					Fingerprint: driver.Fingerprint("{}"),
+				},
+			}
+			if !cmp.Equal(got, want, cmpOpts) {
+				t.Fatal(cmp.Diff(got, want, cmpOpts))
 			}
 		})
 	})

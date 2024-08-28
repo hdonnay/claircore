@@ -113,3 +113,62 @@ func filterErrs[T any](out *error, seq iter.Seq2[T, error]) iter.Seq[T] {
 		}
 	}
 }
+
+// RemoveSource is a [pgx.CopyFromSource] for a [RemSeq].
+type removeSource struct {
+	next func() (driver.NamespacedAdvisory[driver.AdvisoryName], error, bool)
+	stop func()
+	// This is not idiomatic, but we don't control the [pgx.CopyFromSource] API
+	// and need a [context.Context] in the [Values] method.
+	ctx context.Context
+
+	err error
+	adv string
+}
+
+var _ pgx.CopyFromSource = (*removeSource)(nil)
+
+func removeCopySource(ctx context.Context, vs RemSeq) *removeSource {
+	next, stop := iter.Pull2(vs)
+	src := &removeSource{
+		next: next,
+		stop: stop,
+		ctx:  ctx,
+	}
+	return src
+}
+
+func (src *removeSource) Names() []string {
+	return []string{"advisory"}
+}
+
+func (src *removeSource) Next() (ok bool) {
+	var a driver.NamespacedAdvisory[driver.AdvisoryName]
+	a, src.err, ok = src.next()
+	if src.err == nil {
+		src.adv = a.Advisory.Name
+	}
+	return ok && src.err == nil
+}
+
+// Err implements [pgx.CopyFromSource].
+func (src *removeSource) Err() error {
+	if src.err != nil {
+		return src.err
+	}
+	return nil
+}
+
+// Values implements [pgx.CopyFromSource].
+func (src *removeSource) Values() ([]any, error) {
+	const (
+		ordAdvisory int = iota
+		ordReference
+		ordPackage
+		ordAttr
+		numCol
+	)
+	row := make([]any, numCol)
+	row[ordAdvisory] = removeWrapper(src.adv)
+	return row, nil
+}

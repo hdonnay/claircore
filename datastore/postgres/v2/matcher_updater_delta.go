@@ -25,15 +25,15 @@ import (
 //
 // UpdaterDeltaRun is not safe for concurrent use.
 type UpdaterDeltaRun struct {
-	tx   pgx.Tx
-	err  error
-	span trace.Span
-	link []trace.Link
-
+	tx          pgx.Tx
+	err         error
+	span        trace.Span
 	updaterName string
-	runID       int64
-	updaterID   int64
-	updRunID    int64
+	link        []trace.Link
+
+	runID     int64
+	updaterID int64
+	updRunID  int64
 }
 
 // NewDelta starts a "delta" updater run.
@@ -137,9 +137,8 @@ func (u *UpdaterDeltaRun) Add(ctx context.Context, vs AddSeq) (err error) {
 	// TODO(hank) Metrics
 	_ = tag
 	if err != nil {
-		return err
+		return fmt.Errorf(errPre+method+": %w", err)
 	}
-
 	return nil
 }
 
@@ -158,23 +157,23 @@ func (u *UpdaterDeltaRun) Remove(ctx context.Context, vs RemSeq) (err error) {
 		span.End()
 	}()
 
-	for desc, e := range vs {
-		if e != nil {
-			err = fmt.Errorf(errPre+method+": %w", e)
-			return err
-		}
-		_ = desc
-		// INSERT INTO advisory_import ...
+	src := removeCopySource(ctx, vs)
+	ct, err := u.tx.CopyFrom(ctx, pgx.Identifier{`advisory_import`}, src.Names(), src)
+	if err != nil {
+		return fmt.Errorf(errPre+method+": %w", err)
 	}
+	zlog.Debug(ctx).
+		Int64("count", ct).
+		Msg("copied delta removals")
 
 	var tag pgconn.CommandTag
-	tag, err = u.tx.Exec(ctx, `CALL matcher_v2_import.commit_remove();`)
+	// TODO(hank) move to embed
+	tag, err = u.tx.Exec(ctx, `CALL matcher_v2_import.commit_remove($1,$2,$3);`, u.runID, u.updaterID, u.updRunID)
 	// TODO(hank) Metrics
 	_ = tag
 	if err != nil {
-		return err
+		return fmt.Errorf(errPre+method+": %w", err)
 	}
-
 	return nil
 }
 
