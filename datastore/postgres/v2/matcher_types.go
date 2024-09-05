@@ -15,6 +15,7 @@ func registerDataTypes(ctx context.Context, conn *pgx.Conn) error {
 	m := conn.TypeMap()
 	m.TryWrapScanPlanFuncs = append([]pgtype.TryWrapScanPlanFunc{
 		tryEnumScanPlan,
+		tryCommonScanPlan,
 	}, m.TryWrapScanPlanFuncs...)
 	m.TryWrapEncodePlanFuncs = append([]pgtype.TryWrapEncodePlanFunc{
 		tryCommonEncodePlan,
