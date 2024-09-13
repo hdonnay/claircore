@@ -63,6 +63,7 @@ func (src *advisorySource) Values() ([]any, error) {
 	row := make([]interface{}, numCol)
 
 	row[ordAdvisory] = &src.adv
+
 	refs, err := src.adv.Refs(src.ctx)
 	if err != nil {
 		return nil, err
@@ -161,14 +162,5 @@ func (src *removeSource) Err() error {
 
 // Values implements [pgx.CopyFromSource].
 func (src *removeSource) Values() ([]any, error) {
-	const (
-		ordAdvisory int = iota
-		ordReference
-		ordPackage
-		ordAttr
-		numCol
-	)
-	row := make([]any, numCol)
-	row[ordAdvisory] = removeWrapper(src.adv)
-	return row, nil
+	return []any{removeWrapper(src.adv)}, nil
 }

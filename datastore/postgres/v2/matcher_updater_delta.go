@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
@@ -131,11 +130,7 @@ func (u *UpdaterDeltaRun) Add(ctx context.Context, vs AddSeq) (err error) {
 		Int64("count", ct).
 		Msg("copied delta additions")
 
-	var tag pgconn.CommandTag
-	// TODO(hank) move to embed
-	tag, err = u.tx.Exec(ctx, `CALL matcher_v2_import.commit_add($1,$2,$3);`, u.runID, u.updaterID, u.updRunID)
-	// TODO(hank) Metrics
-	_ = tag
+	_, err = u.tx.Exec(ctx, matcherUpdaterDeltaRunAdd, u.runID, u.updaterID, u.updRunID)
 	if err != nil {
 		return fmt.Errorf(errPre+method+": %w", err)
 	}
@@ -166,11 +161,7 @@ func (u *UpdaterDeltaRun) Remove(ctx context.Context, vs RemSeq) (err error) {
 		Int64("count", ct).
 		Msg("copied delta removals")
 
-	var tag pgconn.CommandTag
-	// TODO(hank) move to embed
-	tag, err = u.tx.Exec(ctx, `CALL matcher_v2_import.commit_remove($1,$2,$3);`, u.runID, u.updaterID, u.updRunID)
-	// TODO(hank) Metrics
-	_ = tag
+	_, err = u.tx.Exec(ctx, matcherUpdaterDeltaRunRemove, u.runID, u.updaterID, u.updRunID)
 	if err != nil {
 		return fmt.Errorf(errPre+method+": %w", err)
 	}
@@ -178,27 +169,37 @@ func (u *UpdaterDeltaRun) Remove(ctx context.Context, vs RemSeq) (err error) {
 }
 
 // Finish finalizes the accumulated advisory database state.
-func (u *UpdaterDeltaRun) Finish(ctx context.Context, fp driver.Fingerprint) error {
+func (u *UpdaterDeltaRun) Finish(ctx context.Context, fp driver.Fingerprint, err error) error {
 	const method = `UpdaterDeltaRun.Finish`
 	ctx, span := tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindInternal), trace.WithLinks(u.link...))
 	defer span.End()
 	defer func() { u.tx = nil }()
-	switch s := u.tx.Conn().PgConn().TxStatus(); s {
-	case 'E':
-		return u.tx.Rollback(ctx)
-	case 'T':
+	status := u.tx.Conn().PgConn().TxStatus()
+	zlog.Debug(ctx).
+		Str("status", string(status)).
+		Msg("tx status")
+	switch status {
+	case 'E': // In failed transaction
+		// TODO(hank) Pull a new connection and update the status.
+		return errors.Join(u.tx.Rollback(ctx), err, u.err)
+	case 'T': // In transaction
+	case 'I': // Idle -- how?
+		err = errors.Join(err, errors.New("connection idle; extremely weird, please file a bug"))
 	default:
-		return fmt.Errorf(errPre+method+": unknown tx status: %c", s)
+		return fmt.Errorf(errPre+method+": unknown tx status: %c", status)
 	}
 
-	errs := make([]error, 2)
-	_, errs[0] = u.tx.Exec(ctx, `SELECT matcher_v2_import.finish_updater_run($1::BIGINT, $2::JSONB, $3::TEXT);`, u.updRunID, fp, u.err)
-	if errs[0] != nil {
-		errs[1] = u.tx.Rollback(ctx)
+	ret := make([]error, 2)
+
+	_, ret[0] = u.tx.Exec(ctx, matcherUpdaterDeltaRunFinish,
+		u.updRunID, fp, errors.Join(u.err, err))
+	if ret[0] != nil {
+		ret[1] = u.tx.Rollback(ctx)
 	} else {
-		errs[1] = u.tx.Commit(ctx)
+		ret[1] = u.tx.Commit(ctx)
 	}
-	return errors.Join(errs...)
+
+	return errors.Join(ret...)
 }
 
 // Close releases associated resources.
