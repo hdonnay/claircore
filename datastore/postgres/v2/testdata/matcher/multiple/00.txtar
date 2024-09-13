@@ -1,0 +1,99 @@
+Check-Tables: matcher_v2.advisory, matcher_v2.advisory_meta
+Advisory-Columns: added, generation, name
+Advisory_meta-Columns: issued,summary,description,uri,severity,normalized_severity
+-- Add --
+{
+  "Updater": "test-updater-delta",
+  "Advisory": {
+    "Issued": "2024-08-19T19:45:37Z",
+    "Name": "TEST-001",
+    "Summary": "Test advisory",
+    "Description": "An advisory for testing the system",
+    "URI": "http://example.com",
+    "Severity": {
+      "Upstream": "important",
+      "Normalized": "High"
+    }
+  },
+  "Refs": [
+    {
+      "Namespace": "CVE",
+      "Name": "1992-001"
+    }
+  ]
+}
+{
+  "Updater": "test-updater-delta",
+  "Advisory": {
+    "Issued": "2024-08-19T19:45:37Z",
+    "Name": "TEST-002",
+    "Summary": "Test advisory",
+    "Description": "An advisory for testing the system",
+    "URI": "http://example.com",
+    "Severity": {
+      "Upstream": "important",
+      "Normalized": "High"
+    }
+  },
+  "Refs": [
+    {
+      "Namespace": "CVE",
+      "Name": "1992-001"
+    }
+  ]
+}
+{
+  "Updater": "test-updater-delta",
+  "Advisory": {
+    "Issued": "2024-08-19T19:45:37Z",
+    "Name": "TEST-003",
+    "Summary": "Test advisory 3",
+    "Description": "An advisory for testing the system",
+    "URI": "http://example.com",
+    "Severity": {
+      "Upstream": "important",
+      "Normalized": "High"
+    }
+  },
+  "Refs": [
+    {
+      "Namespace": "CVE",
+      "Name": "1992-002"
+    }
+  ]
+}
+{
+  "Updater": "test-updater-delta",
+  "Advisory": {
+    "Issued": "2024-08-19T19:45:37Z",
+    "Name": "TEST-004",
+    "Summary": "Test advisory 3",
+    "Description": "An advisory for testing the system",
+    "URI": "http://example.com",
+    "Severity": {
+      "Upstream": "important",
+      "Normalized": "High"
+    }
+  },
+  "Refs": [
+    {
+      "Namespace": "CVE",
+      "Name": "1992-003"
+    }
+  ]
+}
+-- Remove --
+-- Check/Advisory --
+[
+  [1, 1, "TEST-001"],
+  [1, 1, "TEST-002"],
+  [1, 1, "TEST-003"],
+  [1, 1, "TEST-004"]
+]
+-- Check/Advisory_meta --
+[
+  ["2024-08-19 19:45:37-00", "Test advisory 3", "An advisory for testing the system", "http://example.com", "important", "High"],
+  ["2024-08-19 19:45:37-00", "Test advisory 3", "An advisory for testing the system", "http://example.com", "important", "High"],
+  ["2024-08-19 19:45:37-00", "Test advisory", "An advisory for testing the system", "http://example.com", "important", "High"],
+  ["2024-08-19 19:45:37-00", "Test advisory", "An advisory for testing the system", "http://example.com", "important", "High"]
+]

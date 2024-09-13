@@ -2,15 +2,12 @@ package postgres
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"reflect"
-	"regexp"
 	"sync"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/quay/zlog"
 
@@ -119,41 +116,4 @@ func okAndCleanup[C io.Closer](t *testing.T) func(C, error) C {
 		})
 		return c
 	}
-}
-
-func countTable(ctx context.Context, t *testing.T, pool *pgxpool.Pool, schema string, ts ...string) {
-	var ct int64
-	for _, i := range ts {
-		n := pgx.Identifier{schema, i}
-		q := fmt.Sprintf(`SELECT COUNT(*) FROM %s;`, n.Sanitize())
-		if err := pool.QueryRow(ctx, q).Scan(&ct); err != nil {
-			t.Error(err)
-		}
-		t.Logf("found %d rows in %q", ct, n[1])
-	}
-}
-
-func testingHooks(t *testing.T, cfg *pgxpool.Config) {
-	pretty, err := regexp.Compile(`[\n\t]+`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tr := queryPrinter{
-		QueryTracer: cfg.ConnConfig.Tracer,
-		pretty:      pretty,
-	}
-	cfg.ConnConfig.Tracer = &tr
-}
-
-type queryPrinter struct {
-	pgx.QueryTracer
-	pretty *regexp.Regexp
-}
-
-func (p *queryPrinter) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	zlog.Debug(ctx).
-		Str("query", p.pretty.ReplaceAllLiteralString(data.SQL, " ")).
-		Interface("args[1:]", data.Args[1:]).
-		Msg("database call")
-	return p.QueryTracer.TraceQueryStart(ctx, conn, data)
 }

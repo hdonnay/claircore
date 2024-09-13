@@ -13,20 +13,11 @@ import (
 	"github.com/quay/claircore/toolkit/types/cvss"
 	"github.com/quay/zlog"
 
+	"github.com/quay/claircore/datastore/postgres/v2/internal/testutil"
 	"github.com/quay/claircore/test/integration"
 	pgtest "github.com/quay/claircore/test/postgres"
 	"github.com/quay/claircore/updater/driver/v2"
 )
-
-func testMust[T any](t *testing.T) func(T, error) T {
-	return func(v T, err error) T {
-		t.Helper()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return v
-	}
-}
 
 func TestTypes(t *testing.T) {
 	integration.NeedDB(t)
@@ -39,7 +30,7 @@ func TestTypes(t *testing.T) {
 		cfg := pgtest.TestMatcherDBv5(ctx, t)
 		cfg = Configure(ctx, cfg)
 		// Add a hook that prints out the actual query and arguments.
-		testingHooks(t, cfg)
+		testutil.PrintQueries(t, cfg)
 
 		pool, err := pgxpool.NewWithConfig(ctx, cfg)
 		if err != nil {

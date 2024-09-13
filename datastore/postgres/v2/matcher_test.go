@@ -6,9 +6,11 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/quay/zlog"
 
+	"github.com/quay/claircore/datastore/postgres/v2/internal/testutil"
 	"github.com/quay/claircore/updater/driver/v2"
 )
 
@@ -88,7 +90,11 @@ func (*matcherSuite) GetUpdateOperations(ctx context.Context, t *testing.T, pool
 			t.Errorf("error cleaning up: %v", err)
 		}
 	}()
-	countTable(ctx, t, pool, `matcher_v2`, `updater`, `run`, `updater_run`)
+	testutil.CountTables(ctx, t, pool,
+		pgx.Identifier{`matcher_v2`, `updater`},
+		pgx.Identifier{`matcher_v2`, `run`},
+		pgx.Identifier{`matcher_v2`, `updater_run`},
+	)
 
 	seq, _ := m.GetUpdateOperations(ctx, "")
 	var want []driver.UpdateOperation
