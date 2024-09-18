@@ -17,6 +17,8 @@ import (
 	"github.com/quay/claircore/updater/driver/v2"
 )
 
+// Matcher is the component that interacts with the database containing flaw
+// advisories.
 type Matcher struct {
 	pool *pgxpool.Pool
 
@@ -28,6 +30,13 @@ type Matcher struct {
 
 const minMatcherMigration = 13
 
+// NewMatcherV2 constructs a [Matcher].
+//
+// The "V2" signifies that this implements the relevant "V2" of the
+// [github.com/quay/claircore/datastore] interfaces.
+//
+// The returned [Matcher] does not close the [pgxpool.Pool] when closed.
+// If [Matcher.Close] is not called, the program may panic.
 func NewMatcherV2(ctx context.Context, matcher *pgxpool.Pool) (*Matcher, error) {
 	reg, err := o11y.CollectStats(matcher)
 	if err != nil {
@@ -51,21 +60,27 @@ func NewMatcherV2(ctx context.Context, matcher *pgxpool.Pool) (*Matcher, error) 
 	}
 
 	_, file, line, _ := runtime.Caller(1)
-	runtime.SetFinalizer(&m, func(m *Matcher) {
+	runtime.SetFinalizer(&m, func(_ *Matcher) {
 		panic(fmt.Sprintf("%s:%d: postgres/v2.Matcher not closed", file, line))
 	})
 	ok = true
 	return &m, nil
 }
 
+// Close releases any held resources.
+//
+// The program may panic if not called.
 func (m *Matcher) Close() error {
 	runtime.SetFinalizer(m, nil)
 	return m.reg.Unregister()
 }
 
-// var _ datastore.UpdaterNG = (*MatcherV2)(nil)
-
-func (u *Matcher) CollectGarbage(ctx context.Context, dur time.Duration) error {
+// CollectGarbage removes all [Run]s older than the specified [time.Duration].
+//
+// To emulate the previous behavior ...
+//
+// TODO(hank) Write this method.
+func (m *Matcher) CollectGarbage(ctx context.Context, dur time.Duration) error {
 	// For updaters in the work set, return the ones that have successful
 	// runs outside the work set
 	//
@@ -75,7 +90,7 @@ WITH work_set AS (SELECT id, updater FROM updater_v1.run WHERE run.date < (now()
      recent AS (SELECT updater, bool_or(success) AS success FROM updater_v1.run GROUP BY updater)
 	DELETE FROM run WHERE id IN (SELECT id FROM work_set JOIN recent USING updater WHERE success = TRUE);
 	`
-	return u.pool.AcquireFunc(ctx, func(c *pgxpool.Conn) error {
+	return m.pool.AcquireFunc(ctx, func(c *pgxpool.Conn) error {
 		tag, err := c.Exec(ctx, query, dur)
 		if err != nil {
 			return err
@@ -92,15 +107,18 @@ WITH work_set AS (SELECT id, updater FROM updater_v1.run WHERE run.date < (now()
 //
 // If "strict" is true, the method reports if the latest completed run finished
 // without errors and with the currently configured set of Updaters.
-func (u *Matcher) Initialized(ctx context.Context, strict bool) (out bool, err error) {
+func (m *Matcher) Initialized(ctx context.Context, strict bool) (out bool, err error) {
 	if strict {
 		return false, errors.ErrUnsupported
 	}
-	return out, u.pool.
+	return out, m.pool.
 		QueryRow(ctx, matcherInitialized).
 		Scan(&out)
 }
 
-func (u *Matcher) GetUpdateDiff(ctx context.Context, prev, cur uuid.UUID) (*driver.UpdateDiff, error) {
-	return nil, nil
+// GetUpdateDiff ...
+//
+// TODO(hank) Write this method.
+func (m *Matcher) GetUpdateDiff(ctx context.Context, prev, cur uuid.UUID) (*driver.UpdateDiff, error) {
+	return nil, errors.ErrUnsupported
 }

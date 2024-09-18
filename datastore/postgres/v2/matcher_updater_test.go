@@ -30,6 +30,7 @@ import (
 	"github.com/quay/claircore/updater/driver/v2"
 )
 
+// Updater runs the updater-related tests.
 func (*matcherSuite) Updater(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
 	m := mkMatcher(ctx, t, pool)
 
@@ -91,14 +92,14 @@ func (*matcherSuite) Updater(ctx context.Context, t *testing.T, pool *pgxpool.Po
 	})
 }
 
-func tescasesFromGlob(m *Matcher, glob string) iter.Seq[deltaMatcherTestcase] {
+func tescasesFromGlob(m *Matcher, glob string) iter.Seq[DeltaUpdaterTestcase] {
 	ms, err := filepath.Glob(glob)
 	if err != nil {
 		panic(err)
 	}
-	return func(yield func(deltaMatcherTestcase) bool) {
+	return func(yield func(DeltaUpdaterTestcase) bool) {
 		for _, name := range ms {
-			tc := deltaMatcherTestcase{
+			tc := DeltaUpdaterTestcase{
 				Matcher: m,
 				Fixture: name,
 			}
@@ -109,7 +110,8 @@ func tescasesFromGlob(m *Matcher, glob string) iter.Seq[deltaMatcherTestcase] {
 	}
 }
 
-type deltaMatcherTestcase struct {
+// DeltaUpdaterTestcase describes a subtest for the Delta Updater subsystem.
+type DeltaUpdaterTestcase struct {
 	Matcher *Matcher
 
 	// Optional, will be populated if not provided:
@@ -124,11 +126,14 @@ type deltaMatcherTestcase struct {
 	DeltaRunRef uuid.UUID
 }
 
+// Caser returns a lazily constructed [cases.Caser].
 var caser = sync.OnceValue(func() cases.Caser {
 	return cases.Title(language.English)
 })
 
-func (tc *deltaMatcherTestcase) RunFixture(ctx context.Context, t *testing.T, wantOps *[]driver.UpdateOperation) {
+// RunFixture runs a subtest created from the fixture specified in the
+// [deltaMatcherTestcase].
+func (tc *DeltaUpdaterTestcase) RunFixture(ctx context.Context, t *testing.T, wantOps *[]driver.UpdateOperation) {
 	if tc.Fixture == "" {
 		t.Fatalf("no fixture supplied in testcase definition")
 	}
@@ -160,7 +165,7 @@ func (tc *deltaMatcherTestcase) RunFixture(ctx context.Context, t *testing.T, wa
 		if v := hdr.Get("fingerprint"); v != "" {
 			fp = driver.Fingerprint(v)
 		}
-		var runErr error = nil
+		var runErr error
 		if v := hdr.Get("error"); v != "" {
 			runErr = errors.New(v)
 		}
@@ -178,6 +183,7 @@ func (tc *deltaMatcherTestcase) RunFixture(ctx context.Context, t *testing.T, wa
 		applyUpdaterRun(ctx, t, dr, ar)(fp, runErr)
 
 		if hdr.Get("check-tables") == "" {
+			// Nothing to check; done.
 			return
 		}
 
@@ -228,8 +234,9 @@ func (tc *deltaMatcherTestcase) RunFixture(ctx context.Context, t *testing.T, wa
 						t.Fatalf("unable to construct json row source: unknown type: %T", wantVals[0])
 					}
 				}
-				src := pgx.CopyFromSlice(len(wantVals), nf)
-				acqFunc := cmpTable(ctx, t, table, columns, src)
+				wantSource := pgx.CopyFromSlice(len(wantVals), nf)
+				gotSource := pgx.Identifier(strings.Split(table, "."))
+				acqFunc := testutil.CompareTable(ctx, t, gotSource, columns, wantSource)
 				if err := tc.Matcher.pool.AcquireFunc(ctx, acqFunc); err != nil {
 					t.Error(err)
 				}
@@ -238,6 +245,12 @@ func (tc *deltaMatcherTestcase) RunFixture(ctx context.Context, t *testing.T, wa
 	})
 }
 
+// ApplyUpdaterRun loads an [UpdaterDeltaRun] as described in the provided
+// [txtar.Archive] and returns a function to apply it to the provided
+// [UpdaterDeltaRun].
+//
+// The returned function must be called to finish the UpdaterDeltaRun.
+// See also [testutil.LoadJSON].
 func applyUpdaterRun(ctx context.Context, t *testing.T, dr *UpdaterDeltaRun, ar *txtar.Archive) func(driver.Fingerprint, error) {
 	var addTodo AddSeq
 	var remTodo RemSeq
@@ -287,7 +300,7 @@ func (adv *testAdvisory) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// ToAdvisories maps [testAdvisory] to the underlying
+// ToAdvisories maps the sequence of [testAdvisory] to the underlying
 // [driver.NamespacedAdvisory[driver.Advisory]].
 func toAdvisories(seq iter.Seq2[testAdvisory, error]) iter.Seq2[driver.NamespacedAdvisory[driver.Advisory], error] {
 	return func(yield func(driver.NamespacedAdvisory[driver.Advisory], error) bool) {
@@ -314,125 +327,3 @@ func dummyAdvisorySeq[T any, S ~[]T](s S) func(context.Context) (iter.Seq2[T, er
 // SplitItem is for use with [strings.FieldsFunc].
 // Reports if the rune is whitespace or ",".
 func splitItem(r rune) bool { return r == ',' || unicode.IsSpace(r) }
-
-// CmpTable returns a function for use with [pgxpool.AcquireFunc] that compares
-// columns "columns" between the data in "table" and the data in "src".
-func cmpTable(ctx context.Context, t *testing.T, table string, columns []string, src pgx.CopyFromSource) func(*pgxpool.Conn) error {
-	srcTable := pgx.Identifier(strings.Split(table, "."))
-	got := pgx.Identifier{"test_got"}
-	want := pgx.Identifier{"test_want"}
-	b := &strings.Builder{}
-
-	return func(pc *pgxpool.Conn) error {
-		// Track if "got" and "want" were populated, for error printing.
-		var gotPop, wantPop bool
-		// Pull the connection out of the pool and close it to make sure the
-		// temporary table is cleaned up immediately.
-		c := pc.Hijack()
-		defer func() {
-			if gotPop && t.Failed() {
-				dumpTable(ctx, t, c, got)
-			}
-			if wantPop && t.Failed() {
-				dumpTable(ctx, t, c, want)
-			}
-			if err := c.Close(ctx); err != nil {
-				t.Errorf("closing connection: %v", err)
-			}
-		}()
-
-		// Create the "got" and "want" tables.
-		// The "got" table is populated here.
-		if _, err := c.Exec(ctx, comparisonTables(b, srcTable, got, want, columns)); err != nil {
-			return err
-		}
-		// Populate the "want" table.
-		if _, err := c.CopyFrom(ctx, want, columns, src); err != nil {
-			return err
-		}
-
-		// Compare the tables, returning JSON objects.
-		rows, err := c.Query(ctx, comparisonQuery(b, got, want))
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-
-		// Just print any mismatching rows:
-		var out strings.Builder
-		for rows.Next() {
-			fmt.Fprintln(&out, string(rows.RawValues()[0]))
-		}
-		if out.Len() != 0 {
-			t.Errorf("mismatched rows:\n%s", out.String())
-		} else {
-			t.Logf("OK")
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-
-		return nil
-	}
-}
-
-// DumpTable returns the contents of the table "name" as JSON objects.
-func dumpTable(ctx context.Context, t *testing.T, c *pgx.Conn, name pgx.Identifier) {
-	const dump = `SELECT row_to_json(res) FROM %s res;`
-	var out strings.Builder
-	rows, err := c.Query(ctx, fmt.Sprintf(dump, name.Sanitize()))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	rs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (string, error) {
-		return string(slices.Clone(row.RawValues()[0])), nil
-	})
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	for _, r := range rs {
-		fmt.Fprintln(&out, r)
-	}
-	t.Logf("table %s:\n%s", name.Sanitize(), out.String())
-}
-
-// ComparisonTables returns SQL that creates two tables, "got" and "want", with
-// columns "columns". These columns must exist in "src". The table named by
-// "got" is populated from "src".
-func comparisonTables(b *strings.Builder, src, got, want pgx.Identifier, columns []string) string {
-	if b == nil {
-		b = new(strings.Builder)
-	}
-	defer b.Reset()
-	// "got" table:
-	fmt.Fprintf(b, `CREATE TEMPORARY TABLE %s AS SELECT `, got.Sanitize())
-	for i, col := range columns {
-		if i != 0 {
-			b.WriteString(`, `)
-		}
-		b.WriteString(pgx.Identifier(strings.Split(col, ".")).Sanitize())
-	}
-	fmt.Fprintf(b, " FROM %s;\n", src.Sanitize())
-	// "want" table:
-	fmt.Fprintf(b, "CREATE TEMPORARY TABLE %s (LIKE %s);", want.Sanitize(), got.Sanitize())
-	return b.String()
-}
-
-// ComparisonQuery returns SQL that compares the tables "got" and "want",
-// returning rows with one extra column named "cmp", which contains "+" if the
-// row exists only in "got" or "-" if the row exists only in "want".
-func comparisonQuery(b *strings.Builder, got, want pgx.Identifier) string {
-	const except = "SELECT '%s' cmp, * FROM (SELECT * FROM %s EXCEPT ALL SELECT * FROM %s)"
-	if b == nil {
-		b = new(strings.Builder)
-	}
-	defer b.Reset()
-	b.WriteString("SELECT row_to_json(res) FROM (")
-	fmt.Fprintf(b, except, "+", got.Sanitize(), want.Sanitize())
-	b.WriteString(" UNION ")
-	fmt.Fprintf(b, except, "-", want.Sanitize(), got.Sanitize())
-	b.WriteString(") res;")
-	return b.String()
-}

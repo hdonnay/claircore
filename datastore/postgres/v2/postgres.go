@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/quay/claircore/datastore/postgres/v2/internal/o11y"
+	"github.com/quay/zlog"
 )
 
 // ErrPre is a prefix for error strings.
@@ -61,6 +61,10 @@ func Configure(ctx context.Context, cfg *pgxpool.Config) *pgxpool.Config {
 
 	return cfg
 }
+
+// TokenFunc is a function that reports a pagination token for the last value
+// read from a paired iterator.
+type TokenFunc func() string
 
 // SanityCheck runs a bunch of status checks against a database.
 //
@@ -130,60 +134,23 @@ func sanityCheck(ctx context.Context, workMem *int64, migrationTable string, sch
 // NoticeHandler returns a handler to log notices from the database, using the
 // passed Context.
 func noticeHandler(ctx context.Context) func(*pgconn.PgConn, *pgconn.Notice) {
-	// TODO(hank) turn these into logs
-	_ = ctx
 	return func(conn *pgconn.PgConn, n *pgconn.Notice) {
-		/*
-			level := slog.LevelDebug - 3
-			switch n.Severity {
-			case "ERROR", "FATAL", "PANIC":
-				level = slog.LevelError
-			case "WARNING":
-				level = slog.LevelWarn
-			case "NOTICE", "INFO", "LOG":
-				level = slog.LevelInfo
-			case "DEBUG":
-				level = slog.LevelDebug
-			}
-			slog.Log(ctx, level, "notice from database", "notice", noticeLogger{n})
-		*/
-	}
-}
-
-type noticeLogger struct {
-	*pgconn.Notice
-}
-
-func (n noticeLogger) LogValue() slog.Value {
-	// Could unroll this, but it'd be annoying.
-	todo := []struct {
-		field *string
-		key   string
-	}{
-		{&n.Code, "code"},
-		{&n.Message, "message"},
-		{&n.Detail, "detail"},
-		{&n.Hint, "hint"},
-		{&n.Where, "where"},
-		{&n.SchemaName, "schema_name"},
-		{&n.TableName, "table_name"},
-		{&n.ColumnName, "column_name"},
-		{&n.DataTypeName, "data_type_name"},
-		{&n.ConstraintName, "constraint_name"},
-		{&n.File, "file"},
-		{&n.Routine, "routine"},
-	}
-	as := make([]slog.Attr, 0, len(todo)+2)
-	for _, t := range todo {
-		if *t.field != "" {
-			as = append(as, slog.String(t.key, *t.field))
+		ev := zlog.Info(ctx)
+		switch n.Severity {
+		case "ERROR", "FATAL", "PANIC":
+			ev.Discard()
+			ev = zlog.Error(ctx)
+		case "WARNING":
+			ev.Discard()
+			ev = zlog.Warn(ctx)
+		case "NOTICE", "INFO", "LOG":
+		default:
+			ev.Discard()
+			return
 		}
+		ev.
+			Uint32("pid", conn.PID()).
+			Interface("notice", n).
+			Msg("database notice")
 	}
-	if n.Position > 0 {
-		as = append(as, slog.Int64("position", int64(n.Position)))
-	}
-	if n.Line > 0 {
-		as = append(as, slog.Int64("line", int64(n.Line)))
-	}
-	return slog.GroupValue(as...)
 }

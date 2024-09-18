@@ -5,20 +5,14 @@ Package postgres implements v2 of the claircore datastore interfaces.
 
 tktk
 
-# Matcher
-
-tktk
-
-# Updater
-
-tktk
-
 # Contributing
 
-Functions should make use of [pgxpool.Pool.AcquireFunc]/[pgx.BeginTxFunc] to make use of the observability helpers
-(see [Configure] and [o11y]).
+Functions should use [pgxpool.Pool.AcquireFunc]/[pgx.BeginTxFunc] to make use of the observability helpers
+(see [Configure] and [internal/o11y]).
 
-SQL statements are embedded as string literals.
+SQL statements are embedded as string literals with the help of a program run via `go generate`.
+This is done instead of using "embed" directly to be able to generate metadata alongside the queries.
+See [NameLookup]/[TableLookup]/[OpLookup].
 
 Read methods should generally follow this pattern:
 
@@ -26,11 +20,10 @@ Read methods should generally follow this pattern:
 
 This means the method should take a pagination token as the last argument and return
 an iterator and a function to return the pagination token for the most recently yielded value.
-There are helpers to implement this in an efficient way; see the [cursor] and [ringbuf] packages.
-
+There are helpers to implement this in an efficient way;
+see the [internal/cursor] and [internal/ringbuf] packages.
 This method signature and helpers force queries to be written using keyset pagination,
 which is needed for efficient queries.
-
 This sort of method allows for efficient memory use in RPC situations:
 
 	const breakSz = 102400
@@ -54,8 +47,29 @@ This sort of method allows for efficient memory use in RPC situations:
 		w.Header().Set("Link", fmt.Sprintf("<.?last=%s>;rel=next", token()))
 		io.Copy(w, &b)
 	}
+
+This package should try to avoid processing local types into SQL in methods directly.
+Instead, leverage type mapping via [github.com/jackc/pgx/v5/pgtype].
+See the existing code in this package (ending in "_types.go") and
+the examples called out in the [pgtype] documentation.
+
+# Tests
+
+See the [test/integration] and [test/postgres] packages for integration and helper code.
+
+If the type handling code is isolated correctly,
+those tests should be verifying that values are being translated between Go and PostgreSQL correctly.
+This means the method testing should only require a database to verify any concurrency semantics,
+and could be mocked out for most testing.
+
+Currently, this package uses a full PostgreSQL database because the harness already existed.
 */
 package postgres
+
+// TODO(hank) Keep an eye on the [AddCleanup] proposal and use it to replace the
+// [runtime.SetFinalizer] usage in this package.
+//
+// [AddCleanup]: https://github.com/golang/go/issues/67535
 
 // Style tip: use the "Func" methods on the Pool to get a scope for
 // metrics/tracing for "free."
