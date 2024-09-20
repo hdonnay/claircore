@@ -1,5 +1,6 @@
-{
-  "Updater": "test-updater-delta",
+-- Snapshot --
+{
+  "Updater": "test-updater-snapshot",
   "Advisory": {
     "Issued": "2024-08-19T19:45:37Z",
     "Name": "TEST-001",
@@ -18,8 +19,8 @@
     }
   ]
 }
-{
-  "Updater": "test-updater-delta",
+{
+  "Updater": "test-updater-snapshot",
   "Advisory": {
     "Issued": "2024-08-19T19:45:37Z",
     "Name": "TEST-002",
