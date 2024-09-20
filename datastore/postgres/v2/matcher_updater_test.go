@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"net/textproto"
 	"path"
 	"path/filepath"
 	"slices"
@@ -76,30 +77,37 @@ func (*matcherSuite) Updater(ctx context.Context, t *testing.T, pool *pgxpool.Po
 			}
 		}
 
-		for tc := range tescasesFromGlob(m, "testdata/matcher/*.txtar") {
-			tc.RunFixture(ctx, t, &wantOps)
+		for tc := range tescasesFromGlob(m, "testdata/matcher/delta/*.txtar") {
+			tc.RunDeltaFixture(ctx, t, &wantOps)
 			checkOps(ctx)(t)
 		}
 
 		t.Run("Multiple", func(t *testing.T) {
 			ctx := zlog.Test(ctx, t)
 			resetOps(ctx)(t)
-			for tc := range tescasesFromGlob(m, "testdata/matcher/multiple/*.txtar") {
-				tc.RunFixture(ctx, t, &wantOps)
+			for tc := range tescasesFromGlob(m, "testdata/matcher/delta/multiple/*.txtar") {
+				tc.RunDeltaFixture(ctx, t, &wantOps)
 			}
 			checkOps(ctx)(t)
 		})
 	})
+
+	t.Run("Snapshot", func(t *testing.T) {
+		ctx := zlog.Test(ctx, t)
+		for tc := range tescasesFromGlob(m, "testdata/matcher/snapshot/*.txtar") {
+			tc.RunSnapshotFixture(ctx, t, nil)
+		}
+	})
 }
 
-func tescasesFromGlob(m *Matcher, glob string) iter.Seq[DeltaUpdaterTestcase] {
+func tescasesFromGlob(m *Matcher, glob string) iter.Seq[UpdaterTestcase] {
 	ms, err := filepath.Glob(glob)
 	if err != nil {
 		panic(err)
 	}
-	return func(yield func(DeltaUpdaterTestcase) bool) {
+	return func(yield func(UpdaterTestcase) bool) {
 		for _, name := range ms {
-			tc := DeltaUpdaterTestcase{
+			tc := UpdaterTestcase{
 				Matcher: m,
 				Fixture: name,
 			}
@@ -110,30 +118,34 @@ func tescasesFromGlob(m *Matcher, glob string) iter.Seq[DeltaUpdaterTestcase] {
 	}
 }
 
-// DeltaUpdaterTestcase describes a subtest for the Delta Updater subsystem.
-type DeltaUpdaterTestcase struct {
+// UpdaterTestcase describes a subtest for the Delta Updater subsystem.
+type UpdaterTestcase struct {
 	Matcher *Matcher
+	Fixture string
 
 	// Optional, will be populated if not provided:
 	Name        string
 	UpdaterName string
 
-	// Populate one of these:
-	Fixture string
-
 	// Populated during the testcase:
-	RunRef      uuid.UUID
-	DeltaRunRef uuid.UUID
+	RunRef        uuid.UUID
+	UpdaterRunRef uuid.UUID
 }
 
-// Caser returns a lazily constructed [cases.Caser].
-var caser = sync.OnceValue(func() cases.Caser {
-	return cases.Title(language.English)
-})
+// RunDeltaFixture runs a subtest created from the fixture specified in the
+// [UpdaterTestcase].
+func (tc *UpdaterTestcase) RunDeltaFixture(ctx context.Context, t *testing.T, wantOps *[]driver.UpdateOperation) {
+	runUpdaterTestcase[UpdaterDeltaRun](ctx, t, tc, wantOps)
+}
 
-// RunFixture runs a subtest created from the fixture specified in the
-// [deltaMatcherTestcase].
-func (tc *DeltaUpdaterTestcase) RunFixture(ctx context.Context, t *testing.T, wantOps *[]driver.UpdateOperation) {
+// RunSnapshotFixture runs a subtest created from the fixture specified in the
+// [UpdaterTestcase].
+func (tc *UpdaterTestcase) RunSnapshotFixture(ctx context.Context, t *testing.T, wantOps *[]driver.UpdateOperation) {
+	runUpdaterTestcase[UpdaterSnapshotRun](ctx, t, tc, wantOps)
+}
+
+func (tc *UpdaterTestcase) check(t *testing.T, name string) {
+	t.Helper()
 	if tc.Fixture == "" {
 		t.Fatalf("no fixture supplied in testcase definition")
 	}
@@ -141,25 +153,31 @@ func (tc *DeltaUpdaterTestcase) RunFixture(ctx context.Context, t *testing.T, wa
 		tc.Name = caser().String(strings.TrimSuffix(path.Base(tc.Fixture), path.Ext(tc.Fixture)))
 	}
 	if tc.UpdaterName == "" {
-		tc.UpdaterName = `test-updater-delta`
+		tc.UpdaterName = name
 	}
+}
+
+func (tc *UpdaterTestcase) loadFixture(t *testing.T) (*txtar.Archive, textproto.MIMEHeader) {
+	ar, err := txtar.ParseFile(tc.Fixture)
+	if err != nil {
+		t.Fatalf("unable to load fixture %q: %v", tc.Fixture, err)
+	}
+	tc.RunRef = testutil.MakeUUID(t)
+	tc.UpdaterRunRef = testutil.MakeUUID(t)
+	hdr := testutil.LoadHeaders(t, ar)
+	return ar, hdr
+}
+
+// RunUpdaterTestcase runs the [UpdaterTestcase], using an updater run of the
+// kind of the type parameter.
+//
+// This is a free function to be able to use a type parameter.
+func runUpdaterTestcase[T any](ctx context.Context, t *testing.T, tc *UpdaterTestcase, wantOps *[]driver.UpdateOperation) {
+	var zero T
+	tc.check(t, fmt.Sprintf(`test-updater-%T`, zero))
 	t.Run(tc.Name, func(t *testing.T) {
 		ctx := zlog.Test(ctx, t)
-		ar, err := txtar.ParseFile(tc.Fixture)
-		if err != nil {
-			t.Fatalf("unable to load fixture %q: %v", tc.Fixture, err)
-		}
-		tc.RunRef = testutil.MakeUUID(t)
-		tc.DeltaRunRef = testutil.MakeUUID(t)
-		hdr := testutil.LoadHeaders(t, ar)
-
-		run := okAndCleanup[*Run](t)(tc.Matcher.UpdatersRun(ctx, tc.RunRef))
-		defer func() {
-			if err := run.Complete(ctx); err != nil {
-				t.Errorf("unable to complete run: %v", err)
-			}
-		}()
-		dr := okAndCleanup[*UpdaterDeltaRun](t)(run.NewDelta(ctx, tc.DeltaRunRef, tc.UpdaterName))
+		ar, hdr := tc.loadFixture(t)
 
 		fp := driver.Fingerprint(`{}`)
 		if v := hdr.Get("fingerprint"); v != "" {
@@ -173,14 +191,32 @@ func (tc *DeltaUpdaterTestcase) RunFixture(ctx context.Context, t *testing.T, wa
 			*wantOps = append(*wantOps, driver.UpdateOperation{
 				Date:        time.Now(),
 				Updater:     tc.UpdaterName,
-				Ref:         tc.DeltaRunRef,
+				Ref:         tc.UpdaterRunRef,
 				Fingerprint: fp,
 				Success:     runErr == nil,
 				Error:       runErr,
 			})
 		}
 
-		applyUpdaterRun(ctx, t, dr, ar)(fp, runErr)
+		run := okAndCleanup[*Run](t)(tc.Matcher.UpdatersRun(ctx, tc.RunRef))
+		defer func() {
+			if err := run.Complete(ctx); err != nil {
+				t.Errorf("unable to complete run: %v", err)
+			}
+		}()
+
+		var apply applyUpdaterRun
+		switch any(zero).(type) {
+		case UpdaterDeltaRun:
+			dr := okAndCleanup[*UpdaterDeltaRun](t)(run.NewDelta(ctx, tc.UpdaterRunRef, tc.UpdaterName))
+			apply = partialDeltaUpdaterRun(dr)
+		case UpdaterSnapshotRun:
+			sr := okAndCleanup[*UpdaterSnapshotRun](t)(run.NewSnapshot(ctx, tc.UpdaterRunRef, tc.UpdaterName, fp))
+			apply = partialSnapshotUpdaterRun(sr)
+		default:
+			panic(fmt.Sprintf("called with bad type parameter: %T", zero))
+		}
+		apply(ctx, t, ar)(fp, runErr)
 
 		if hdr.Get("check-tables") == "" {
 			// Nothing to check; done.
@@ -245,32 +281,74 @@ func (tc *DeltaUpdaterTestcase) RunFixture(ctx context.Context, t *testing.T, wa
 	})
 }
 
-// ApplyUpdaterRun loads an [UpdaterDeltaRun] as described in the provided
-// [txtar.Archive] and returns a function to apply it to the provided
-// [UpdaterDeltaRun].
+// Caser returns a lazily constructed [cases.Caser].
+var caser = sync.OnceValue(func() cases.Caser {
+	return cases.Title(language.English)
+})
+
+// ApplyUpdaterRun applies the steps described in the [txtar.Archive].
 //
-// The returned function must be called to finish the UpdaterDeltaRun.
+// The returned function must be called to finish the updater run.
 // See also [testutil.LoadJSON].
-func applyUpdaterRun(ctx context.Context, t *testing.T, dr *UpdaterDeltaRun, ar *txtar.Archive) func(driver.Fingerprint, error) {
-	var addTodo AddSeq
-	var remTodo RemSeq
-	for _, f := range ar.Files {
-		switch strings.ToLower(f.Name) {
-		case "add":
-			addTodo = toAdvisories(testutil.LoadJSON[testAdvisory](t, bytes.NewReader(f.Data)))
-		case "remove":
-			remTodo = testutil.LoadJSON[driver.NamespacedAdvisory[driver.AdvisoryName]](t, bytes.NewReader(f.Data))
+type applyUpdaterRun func(context.Context, *testing.T, *txtar.Archive) func(driver.Fingerprint, error)
+
+// PartialDeltaUpdaterRun closes over the [UpdaterDeltaRun] and returns a
+// function that runs the steps described in the provided [txtar.Archive].
+func partialDeltaUpdaterRun(dr *UpdaterDeltaRun) applyUpdaterRun {
+	return func(ctx context.Context, t *testing.T, ar *txtar.Archive) func(driver.Fingerprint, error) {
+		var addTodo AddSeq
+		var remTodo RemSeq
+		for _, f := range ar.Files {
+			switch strings.ToLower(f.Name) {
+			case "add":
+				addTodo = toAdvisories(testutil.LoadJSON[testAdvisory](t, bytes.NewReader(f.Data)))
+			case "remove":
+				remTodo = testutil.LoadJSON[driver.NamespacedAdvisory[driver.AdvisoryName]](t, bytes.NewReader(f.Data))
+			}
+		}
+		if addTodo == nil && remTodo == nil {
+			t.Fatal(`no "add" or "remove" file found in fixture archive`)
+		}
+		runErr := errors.Join(dr.Add(ctx, addTodo), dr.Remove(ctx, remTodo))
+		if runErr != nil {
+			t.Errorf("unable to import advisories: %v", runErr)
+		}
+
+		return func(fp driver.Fingerprint, err error) {
+			e := errors.Join(runErr, err)
+			if err := dr.Finish(ctx, fp, e); err != nil {
+				t.Errorf("unable to finish update run: %v", err)
+			}
 		}
 	}
-	runErr := errors.Join(dr.Add(ctx, addTodo), dr.Remove(ctx, remTodo))
-	if runErr != nil {
-		t.Errorf("unable to import advisories: %v", runErr)
-	}
+}
 
-	return func(fp driver.Fingerprint, err error) {
-		e := errors.Join(runErr, err)
-		if err := dr.Finish(ctx, fp, e); err != nil {
-			t.Errorf("unable to finish update run: %v", err)
+// PartialSnapshotUpdaterRun closes over the [UpdaterSnapshotRun] and returns a
+// function that runs the steps described in the provided [txtar.Archive].
+func partialSnapshotUpdaterRun(sr *UpdaterSnapshotRun) applyUpdaterRun {
+	return func(ctx context.Context, t *testing.T, ar *txtar.Archive) func(driver.Fingerprint, error) {
+		var snapTodo AddSeq
+	Files:
+		for _, f := range ar.Files {
+			switch strings.ToLower(f.Name) {
+			case "snapshot":
+				snapTodo = toAdvisories(testutil.LoadJSON[testAdvisory](t, bytes.NewReader(f.Data)))
+				break Files
+			}
+		}
+		if snapTodo == nil {
+			t.Fatal(`no "snapshot" file found in fixture archive`)
+		}
+		runErr := sr.Set(ctx, snapTodo)
+		if runErr != nil {
+			t.Errorf("unable to import advisories: %v", runErr)
+		}
+
+		return func(fp driver.Fingerprint, err error) {
+			e := errors.Join(runErr, err)
+			if err := sr.Finish(ctx, e); err != nil {
+				t.Errorf("unable to finish update run: %v", err)
+			}
 		}
 	}
 }

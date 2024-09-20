@@ -9,11 +9,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/quay/zlog"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/quay/claircore/updater/driver/v2"
-	"github.com/quay/zlog"
 )
 
 // UpdaterDeltaRun is a single updater doing a delta update.
@@ -191,7 +191,7 @@ func (u *UpdaterDeltaRun) Finish(ctx context.Context, fp driver.Fingerprint, err
 
 	ret := make([]error, 2)
 
-	_, ret[0] = u.tx.Exec(ctx, matcherUpdaterDeltaRunFinish,
+	_, ret[0] = u.tx.Exec(ctx, matcherUpdaterRunFinish,
 		u.updRunID, fp, errors.Join(u.err, err))
 	if ret[0] != nil {
 		ret[1] = u.tx.Rollback(ctx)

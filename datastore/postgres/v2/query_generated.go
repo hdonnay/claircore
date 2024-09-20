@@ -22,6 +22,8 @@ var (
 	matcherCreateUpdaterRun string
 	//go:embed query/matcher/GetAdvisories.sql
 	matcherGetAdvisories string
+	//go:embed query/matcher/GetPreviousUpdateOperation.sql
+	matcherGetPreviousUpdateOperation string
 	//go:embed query/matcher/GetUpdateOperations.sql
 	matcherGetUpdateOperations string
 	//go:embed query/matcher/GetUpdaterID.sql
@@ -32,29 +34,33 @@ var (
 	matcherMarkUpdaterError string
 	//go:embed query/matcher/UpdaterDeltaRunAdd.sql
 	matcherUpdaterDeltaRunAdd string
-	//go:embed query/matcher/UpdaterDeltaRunFinish.sql
-	matcherUpdaterDeltaRunFinish string
 	//go:embed query/matcher/UpdaterDeltaRunRemove.sql
 	matcherUpdaterDeltaRunRemove string
+	//go:embed query/matcher/UpdaterRunFinish.sql
+	matcherUpdaterRunFinish string
+	//go:embed query/matcher/UpdaterSnapshotRunSet.sql
+	matcherUpdaterSnapshotRunSet string
 )
 
 // NameLookup maps interned SQL text back to a developer-meaningful name if the
 // query is an embedded string.
 var NameLookup = map[unique.Handle[string]]string{
-	unique.Make(initSelectVersion):            "SelectVersion",
-	unique.Make(initSelectWorkMem):            "SelectWorkMem",
-	unique.Make(matcherBeginUpdaterRun):       "BeginUpdaterRun",
-	unique.Make(matcherCompleteRun):           "CompleteRun",
-	unique.Make(matcherCreateRun):             "CreateRun",
-	unique.Make(matcherCreateUpdaterRun):      "CreateUpdaterRun",
-	unique.Make(matcherGetAdvisories):         "GetAdvisories",
-	unique.Make(matcherGetUpdateOperations):   "GetUpdateOperations",
-	unique.Make(matcherGetUpdaterID):          "GetUpdaterID",
-	unique.Make(matcherInitialized):           "Initialized",
-	unique.Make(matcherMarkUpdaterError):      "MarkUpdaterError",
-	unique.Make(matcherUpdaterDeltaRunAdd):    "UpdaterDeltaRunAdd",
-	unique.Make(matcherUpdaterDeltaRunFinish): "UpdaterDeltaRunFinish",
-	unique.Make(matcherUpdaterDeltaRunRemove): "UpdaterDeltaRunRemove",
+	unique.Make(initSelectVersion):                 "SelectVersion",
+	unique.Make(initSelectWorkMem):                 "SelectWorkMem",
+	unique.Make(matcherBeginUpdaterRun):            "BeginUpdaterRun",
+	unique.Make(matcherCompleteRun):                "CompleteRun",
+	unique.Make(matcherCreateRun):                  "CreateRun",
+	unique.Make(matcherCreateUpdaterRun):           "CreateUpdaterRun",
+	unique.Make(matcherGetAdvisories):              "GetAdvisories",
+	unique.Make(matcherGetPreviousUpdateOperation): "GetPreviousUpdateOperation",
+	unique.Make(matcherGetUpdateOperations):        "GetUpdateOperations",
+	unique.Make(matcherGetUpdaterID):               "GetUpdaterID",
+	unique.Make(matcherInitialized):                "Initialized",
+	unique.Make(matcherMarkUpdaterError):           "MarkUpdaterError",
+	unique.Make(matcherUpdaterDeltaRunAdd):         "UpdaterDeltaRunAdd",
+	unique.Make(matcherUpdaterDeltaRunRemove):      "UpdaterDeltaRunRemove",
+	unique.Make(matcherUpdaterRunFinish):           "UpdaterRunFinish",
+	unique.Make(matcherUpdaterSnapshotRunSet):      "UpdaterSnapshotRunSet",
 }
 
 // TableLookup maps interned SQL text back to the "main" table affected by the
@@ -66,30 +72,34 @@ var TableLookup = map[unique.Handle[string]]string{
 	// matcherCompleteRun: no obvious table
 	// matcherCreateRun: no obvious table
 	// matcherCreateUpdaterRun: no obvious table
-	unique.Make(matcherGetAdvisories):       "updater_v1.run",
-	unique.Make(matcherGetUpdateOperations): "matcher_v2.run",
+	unique.Make(matcherGetAdvisories):              "updater_v1.run",
+	unique.Make(matcherGetPreviousUpdateOperation): "matcher_v2.run",
+	unique.Make(matcherGetUpdateOperations):        "matcher_v2.run",
 	// matcherGetUpdaterID: no obvious table
 	unique.Make(matcherInitialized):      "matcher_v2.run",
 	unique.Make(matcherMarkUpdaterError): "matcher_v2.updater_run",
 	// matcherUpdaterDeltaRunAdd: no obvious table
-	// matcherUpdaterDeltaRunFinish: no obvious table
 	// matcherUpdaterDeltaRunRemove: no obvious table
+	// matcherUpdaterRunFinish: no obvious table
+	// matcherUpdaterSnapshotRunSet: no obvious table
 }
 
 // OpLookup maps interned SQL text back to the kind of operation it is.
 var OpLookup = map[unique.Handle[string]]string{
-	unique.Make(initSelectVersion):            "SELECT",
-	unique.Make(initSelectWorkMem):            "SELECT",
-	unique.Make(matcherBeginUpdaterRun):       "INSERT",
-	unique.Make(matcherCompleteRun):           "SELECT",
-	unique.Make(matcherCreateRun):             "SELECT",
-	unique.Make(matcherCreateUpdaterRun):      "SELECT",
-	unique.Make(matcherGetAdvisories):         "SELECT",
-	unique.Make(matcherGetUpdateOperations):   "SELECT",
-	unique.Make(matcherGetUpdaterID):          "SELECT",
-	unique.Make(matcherInitialized):           "SELECT",
-	unique.Make(matcherMarkUpdaterError):      "UPDATE",
-	unique.Make(matcherUpdaterDeltaRunAdd):    "CALL",
-	unique.Make(matcherUpdaterDeltaRunFinish): "SELECT",
-	unique.Make(matcherUpdaterDeltaRunRemove): "CALL",
+	unique.Make(initSelectVersion):                 "SELECT",
+	unique.Make(initSelectWorkMem):                 "SELECT",
+	unique.Make(matcherBeginUpdaterRun):            "INSERT",
+	unique.Make(matcherCompleteRun):                "SELECT",
+	unique.Make(matcherCreateRun):                  "SELECT",
+	unique.Make(matcherCreateUpdaterRun):           "SELECT",
+	unique.Make(matcherGetAdvisories):              "SELECT",
+	unique.Make(matcherGetPreviousUpdateOperation): "SELECT",
+	unique.Make(matcherGetUpdateOperations):        "SELECT",
+	unique.Make(matcherGetUpdaterID):               "SELECT",
+	unique.Make(matcherInitialized):                "SELECT",
+	unique.Make(matcherMarkUpdaterError):           "UPDATE",
+	unique.Make(matcherUpdaterDeltaRunAdd):         "CALL",
+	unique.Make(matcherUpdaterDeltaRunRemove):      "CALL",
+	unique.Make(matcherUpdaterRunFinish):           "SELECT",
+	unique.Make(matcherUpdaterSnapshotRunSet):      "CALL",
 }
