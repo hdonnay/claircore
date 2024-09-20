@@ -2,14 +2,16 @@ package postgres
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/quay/claircore/toolkit/types"
 	"github.com/quay/claircore/toolkit/types/cpe"
 	"github.com/quay/claircore/toolkit/types/cvss"
 )
 
-// TryCommonEncodePlan supports encoding directly from some domain types.
+// TryCommonEncodePlan supports encoding directly from some common types.
 func tryCommonEncodePlan(tgt any) (plan pgtype.WrappedEncodePlanNextSetter, dst any, ok bool) {
 	switch tgt := tgt.(type) {
 	case *cpe.WFN:
@@ -26,57 +28,17 @@ func tryCommonEncodePlan(tgt any) (plan pgtype.WrappedEncodePlanNextSetter, dst 
 	return nil, nil, false
 }
 
-// Wrapper types for common types.
-type (
-	cpeWrapper                 cpe.WFN
-	cvssWrapper[M cvss.Metric] struct{ cvss.Vector[M] }
-	encodeErrorWrapper         struct{ Err error }
-)
-
-// Implementation assertions for common types.
-var (
-	_ pgtype.TextValuer = (*cpeWrapper)(nil)
-	_ pgtype.TextValuer = cvssWrapper[cvss.V2Metric]{}
-	_ pgtype.TextValuer = cvssWrapper[cvss.V3Metric]{}
-	_ pgtype.TextValuer = cvssWrapper[cvss.V4Metric]{}
-	_ pgtype.TextValuer = encodeErrorWrapper{}
-)
-
-// TextValue implements [pgtype.TextValuer].
-func (c *cpeWrapper) TextValue() (txt pgtype.Text, err error) {
-	if c == nil {
-		return txt, nil
+// TryCommonScanPlan supports scanning directly into some common types.
+func tryCommonScanPlan(tgt any) (plan pgtype.WrappedScanPlanNextSetter, dst any, ok bool) {
+	switch tgt := tgt.(type) {
+	case *error:
+		return &wrapErrorScanPlan{}, scanErrorWrapper{tgt}, true
+	case *types.Severity:
+		return &wrapSeverityScanPlan{}, (*severityWrapper)(tgt), true
+	case *types.PackageKind:
+		return &wrapPackageKindScanPlan{}, (*packageKindWrapper)(tgt), true
 	}
-	wfn := (*cpe.WFN)(c)
-	if err := wfn.Valid(); err != nil {
-		return txt, err
-	}
-	txt.Valid = true
-	txt.String = wfn.BindFS()
-	return txt, nil
-}
-
-// TextValue implements [pgtype.TextValuer].
-func (c cvssWrapper[M]) TextValue() (txt pgtype.Text, err error) {
-	if c.Vector == nil {
-		return txt, nil
-	}
-	b, err := c.MarshalText()
-	if err != nil {
-		return txt, err
-	}
-	txt.Valid = true
-	txt.String = string(b)
-	return txt, nil
-}
-
-// TextValue implements [pgtype.TextValuer].
-func (e encodeErrorWrapper) TextValue() (txt pgtype.Text, _ error) {
-	if e.Err != nil {
-		txt.Valid = true
-		txt.String = e.Err.Error()
-	}
-	return txt, nil
+	return nil, nil, false
 }
 
 // [pgtype.WrappedEncodePlanNextSetter] implementations for common types:
@@ -116,23 +78,101 @@ func (w *wrapErrorEncodePlan) SetNext(next pgtype.EncodePlan) {
 	w.next = next
 }
 
-// TryCommonScanPlan supports scanning directly into some common types.
-func tryCommonScanPlan(tgt any) (plan pgtype.WrappedScanPlanNextSetter, dst any, ok bool) {
-	switch tgt := tgt.(type) {
-	case *error:
-		return &wrapErrorScanPlan{}, scanErrorWrapper{tgt}, true
-	}
-	return nil, nil, false
-}
-
-// Wrapper types for common types.
-type (
-	scanErrorWrapper struct{ Err *error }
+var (
+	_ pgtype.TextValuer = (*cpeWrapper)(nil)
+	_ pgtype.TextValuer = cvssWrapper[cvss.V2Metric]{}
+	_ pgtype.TextValuer = cvssWrapper[cvss.V3Metric]{}
+	_ pgtype.TextValuer = cvssWrapper[cvss.V4Metric]{}
+	_ pgtype.TextValuer = encodeErrorWrapper{}
 )
 
-// Implementation assertions for common types.
+type (
+	cpeWrapper                 cpe.WFN
+	cvssWrapper[M cvss.Metric] struct{ cvss.Vector[M] }
+	encodeErrorWrapper         struct{ Err error }
+)
+
+// TextValue implements [pgtype.TextValuer].
+func (c *cpeWrapper) TextValue() (txt pgtype.Text, err error) {
+	if c == nil {
+		return txt, nil
+	}
+	wfn := (*cpe.WFN)(c)
+	if err := wfn.Valid(); err != nil {
+		return txt, err
+	}
+	txt.Valid = true
+	txt.String = wfn.BindFS()
+	return txt, nil
+}
+
+// TextValue implements [pgtype.TextValuer].
+func (c cvssWrapper[M]) TextValue() (txt pgtype.Text, err error) {
+	if c.Vector == nil {
+		return txt, nil
+	}
+	b, err := c.MarshalText()
+	if err != nil {
+		return txt, err
+	}
+	txt.Valid = true
+	txt.String = string(b)
+	return txt, nil
+}
+
+// TextValue implements [pgtype.TextValuer].
+func (e encodeErrorWrapper) TextValue() (txt pgtype.Text, _ error) {
+	if e.Err != nil {
+		txt.Valid = true
+		txt.String = e.Err.Error()
+	}
+	return txt, nil
+}
+
+// [pgtype.WrappedScanPlanNextSetter] implementations for common types:
+// - [error]
+// - [*types.Severity]
+// - [*types.PackageKind]
+type (
+	wrapErrorScanPlan       struct{ next pgtype.ScanPlan }
+	wrapPackageKindScanPlan struct{ next pgtype.ScanPlan }
+	wrapSeverityScanPlan    struct{ next pgtype.ScanPlan }
+)
+
+// Scan implements [pgtype.WrappedScanPlanNextSetter].
+func (w *wrapErrorScanPlan) Scan(src []byte, tgt any) error {
+	return w.next.Scan(src, scanErrorWrapper{tgt.(*error)})
+}
+
+// SetNext implements [pgtype.WrappedScanPlanNextSetter].
+func (w *wrapErrorScanPlan) SetNext(next pgtype.ScanPlan) { w.next = next }
+
+// Scan implements [pgtype.WrappedScanPlanNextSetter].
+func (w *wrapPackageKindScanPlan) Scan(src []byte, dst any) error {
+	return w.next.Scan(src, (*packageKindWrapper)(dst.(*types.PackageKind)))
+}
+
+// SetNext implements [pgtype.WrappedScanPlanNextSetter].
+func (w *wrapPackageKindScanPlan) SetNext(next pgtype.ScanPlan) { w.next = next }
+
+// Scan implements [pgtype.WrappedScanPlanNextSetter].
+func (w *wrapSeverityScanPlan) Scan(src []byte, dst any) error {
+	return w.next.Scan(src, (*severityWrapper)(dst.(*types.Severity)))
+}
+
+// SetNext implements [pgtype.WrappedScanPlanNextSetter].
+func (w *wrapSeverityScanPlan) SetNext(next pgtype.ScanPlan) { w.next = next }
+
 var (
 	_ pgtype.TextScanner = scanErrorWrapper{}
+	_ pgtype.TextScanner = (*packageKindWrapper)(nil)
+	_ pgtype.TextScanner = (*severityWrapper)(nil)
+)
+
+type (
+	scanErrorWrapper   struct{ Err *error }
+	packageKindWrapper types.PackageKind
+	severityWrapper    types.Severity
 )
 
 // ScanText implements [pgtype.TextScanner].
@@ -143,16 +183,42 @@ func (e scanErrorWrapper) ScanText(v pgtype.Text) error {
 	return nil
 }
 
-// [pgtype.WrappedScanPlanNextSetter] implementations for common types:
-// - [error]
-type (
-	wrapErrorScanPlan struct{ next pgtype.ScanPlan }
-)
-
-// Scan implements [pgtype.WrappedScanPlanNextSetter].
-func (w *wrapErrorScanPlan) Scan(src []byte, tgt any) error {
-	return w.next.Scan(src, scanErrorWrapper{tgt.(*error)})
+// ScanText implements [pgtype.TextScanner].
+func (p *packageKindWrapper) ScanText(v pgtype.Text) error {
+	if !v.Valid {
+		return errors.New("unable to scan null PackageKind")
+	}
+	switch v.String {
+	case "source":
+		*(*types.PackageKind)(p) = types.SourcePackage
+	case "binary":
+		*(*types.PackageKind)(p) = types.BinaryPackage
+	default:
+		*(*types.PackageKind)(p) = types.UnknownPackage
+	}
+	return nil
 }
 
-// SetNext implements [pgtype.WrappedScanPlanNextSetter].
-func (w *wrapErrorScanPlan) SetNext(next pgtype.ScanPlan) { w.next = next }
+// ScanText implements [pgtype.TextScanner].
+func (s *severityWrapper) ScanText(v pgtype.Text) error {
+	if !v.Valid {
+		return errors.New("unable to scan null Severity")
+	}
+	switch v.String {
+	case "Unknown":
+		*(*types.Severity)(s) = types.Unknown
+	case "Negligible":
+		*(*types.Severity)(s) = types.Negligible
+	case "Low":
+		*(*types.Severity)(s) = types.Low
+	case "Medium":
+		*(*types.Severity)(s) = types.Medium
+	case "High":
+		*(*types.Severity)(s) = types.High
+	case "Critical":
+		*(*types.Severity)(s) = types.Critical
+	default:
+		return fmt.Errorf("unknown Severity %q", v.String)
+	}
+	return nil
+}

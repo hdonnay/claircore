@@ -3,10 +3,13 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/quay/claircore/toolkit/types"
 	"github.com/quay/claircore/toolkit/types/cpe"
@@ -38,7 +41,7 @@ func TestTypes(t *testing.T) {
 		}
 		defer pool.Close()
 
-		// Encode tests that
+		// Encode tests that the go types are translated into the expected SQL.
 		t.Run("Encode", func(t *testing.T) {
 			ctx := zlog.Test(ctx, t)
 			conn, err := pool.Acquire(ctx)
@@ -315,10 +318,147 @@ func TestTypes(t *testing.T) {
 					t.Fail()
 				}
 			})
+
+			t.Run("RemoveWrapper", func(t *testing.T) {
+				t.Skip("TODO")
+			})
 		})
 
+		// Scan tests that the SQL is translated correctly into go types.
 		t.Run("Scan", func(t *testing.T) {
-			t.Skip("TODO")
+			ctx := zlog.Test(ctx, t)
+			conn, err := pool.Acquire(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Release()
+
+			t.Run("Error", func(t *testing.T) {
+				ctx := zlog.Test(ctx, t)
+				const query = `SELECT 'some error';`
+				var got error
+				want := errors.New("some error")
+				err := conn.QueryRow(ctx, query).Scan(&got)
+				if err != nil {
+					t.Error(err)
+				}
+				t.Logf("got: %v, want: %v", got, want)
+				if !cmp.Equal(got, want, testutil.CmpOpts) {
+					t.Fail()
+				}
+			})
+			t.Run("Severity", func(t *testing.T) {
+				ctx := zlog.Test(ctx, t)
+				for _, tc := range []struct {
+					Query string
+					Want  types.Severity
+				}{
+					{`SELECT 'Critical'::matcher_v2.Severity;`, types.Critical},
+					{`SELECT 'High'::matcher_v2.Severity;`, types.High},
+					{`SELECT 'Medium'::matcher_v2.Severity;`, types.Medium},
+					{`SELECT 'Low'::matcher_v2.Severity;`, types.Low},
+					{`SELECT 'Negligible'::matcher_v2.Severity;`, types.Negligible},
+					{`SELECT 'Unknown'::matcher_v2.Severity;`, types.Unknown},
+				} {
+					var got types.Severity
+					err := conn.QueryRow(ctx, tc.Query).Scan(&got)
+					if err != nil {
+						t.Error(err)
+					}
+					want := tc.Want
+					t.Logf("got: %v, want: %v", got, want)
+					if !cmp.Equal(got, want, testutil.CmpOpts) {
+						t.Fail()
+					}
+				}
+			})
+			t.Run("PackageKind", func(t *testing.T) {
+				ctx := zlog.Test(ctx, t)
+				for _, tc := range []struct {
+					Query string
+					Want  types.PackageKind
+				}{
+					{`SELECT 'binary'::matcher_v2.PackageKind;`, types.BinaryPackage},
+					{`SELECT 'source'::matcher_v2.PackageKind;`, types.SourcePackage},
+				} {
+					var got types.PackageKind
+					err := conn.QueryRow(ctx, tc.Query).Scan(&got)
+					if err != nil {
+						t.Error(err)
+					}
+					want := tc.Want
+					t.Logf("got: %v, want: %v", got, want)
+					if !cmp.Equal(got, want, testutil.CmpOpts) {
+						t.Fail()
+					}
+				}
+			})
+			t.Run("UpdateOperation", func(t *testing.T) {
+				ctx := zlog.Test(ctx, t)
+				const query = `SELECT ROW('test', 'd03dff60-105b-4de2-ac71-d1971e0e8b50'::uuid, now(), true, '{}'::BYTEA, NULL);`
+				var got driver.UpdateOperation
+				want := driver.UpdateOperation{
+					Updater:     "test",
+					Ref:         uuid.MustParse(`d03dff60-105b-4de2-ac71-d1971e0e8b50`),
+					Date:        time.Now(),
+					Success:     true,
+					Fingerprint: driver.Fingerprint(`{}`),
+				}
+				err := conn.QueryRow(ctx, query).Scan(&got)
+				if err != nil {
+					t.Error(err)
+				}
+				t.Logf("got: %v, want: %v", got, want)
+				if !cmp.Equal(got, want, testutil.CmpOpts) {
+					t.Fail()
+				}
+			})
+			t.Run("Fingerprint", func(t *testing.T) {
+				ctx := zlog.Test(ctx, t)
+				const query = `SELECT '{"is":"json"}'::BYTEA;`
+				var got driver.Fingerprint
+				want := driver.Fingerprint(`{"is":"json"}`)
+				err := conn.QueryRow(ctx, query).Scan(&got)
+				if err != nil {
+					t.Error(err)
+				}
+				t.Logf("got: %#q, want: %#q", got, want)
+				if !cmp.Equal(got, want, testutil.CmpOpts) {
+					t.Fail()
+				}
+			})
+			t.Run("Architecture", func(t *testing.T) {
+				ctx := zlog.Test(ctx, t)
+				for _, tc := range []struct {
+					Query string
+					Want  driver.Architecture
+				}{
+					{`SELECT '386'::matcher_v2.Architecture;`, driver.Arch386},
+					{`SELECT 'amd64'::matcher_v2.Architecture;`, driver.ArchAMD64},
+					{`SELECT 'any'::matcher_v2.Architecture;`, driver.ArchAny},
+					{`SELECT 'arm'::matcher_v2.Architecture;`, driver.ArchArm},
+					{`SELECT 'arm64'::matcher_v2.Architecture;`, driver.ArchArm64},
+					{`SELECT 'mips'::matcher_v2.Architecture;`, driver.ArchMips},
+					{`SELECT 'mips64'::matcher_v2.Architecture;`, driver.ArchMips64},
+					{`SELECT 'mips64le'::matcher_v2.Architecture;`, driver.ArchMips64LE},
+					{`SELECT 'mipsle'::matcher_v2.Architecture;`, driver.ArchMipsLE},
+					{`SELECT 'ppc64'::matcher_v2.Architecture;`, driver.ArchPPC64},
+					{`SELECT 'ppc64le'::matcher_v2.Architecture;`, driver.ArchPPC64LE},
+					{`SELECT 'riscv64'::matcher_v2.Architecture;`, driver.ArchRiscV64},
+					{`SELECT 's390x'::matcher_v2.Architecture;`, driver.ArchS390X},
+				} {
+					var got driver.Architecture
+					err := conn.QueryRow(ctx, tc.Query).Scan(&got)
+					if err != nil {
+						t.Error(err)
+					}
+					want := tc.Want
+					t.Logf("got: %v, want: %v", got, want)
+					if !cmp.Equal(got, want, testutil.CmpOpts) {
+						t.Fail()
+					}
+				}
+			})
 		})
 	})
 
