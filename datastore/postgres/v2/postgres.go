@@ -17,9 +17,6 @@ import (
 	"github.com/quay/zlog"
 )
 
-// ErrPre is a prefix for error strings.
-const errPre = `postgres/v2: `
-
 // Configure returns a copy of the passed [pgxpool.Config] modified with
 // observability hooks and other needed settings.
 //
@@ -135,6 +132,23 @@ func sanityCheck(ctx context.Context, workMem *int64, migrationTable string, sch
 // passed Context.
 func noticeHandler(ctx context.Context) func(*pgconn.PgConn, *pgconn.Notice) {
 	return func(conn *pgconn.PgConn, n *pgconn.Notice) {
+		if n.Code == "LOG00" && n.SchemaName == `matcher_v2_meta` && n.TableName == `log` {
+			ev := zlog.Info(ctx).Bool("database_log", true)
+			kind, msg, ok := strings.Cut(n.Message, ": ")
+			if !ok {
+				ev.
+					Str("raw_message", n.Message).
+					Msg("odd database-side log line")
+				return
+			}
+			if n.Detail != "" {
+				ev = ev.RawJSON("event", []byte(n.Detail))
+			}
+			ev.
+				Str("kind", kind).
+				Msg(msg)
+			return
+		}
 		ev := zlog.Info(ctx)
 		switch n.Severity {
 		case "ERROR", "FATAL", "PANIC":

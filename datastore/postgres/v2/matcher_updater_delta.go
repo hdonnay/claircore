@@ -2,10 +2,8 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"runtime"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -24,15 +22,7 @@ import (
 //
 // UpdaterDeltaRun is not safe for concurrent use.
 type UpdaterDeltaRun struct {
-	tx          pgx.Tx
-	err         error
-	span        trace.Span
-	updaterName string
-	link        []trace.Link
-
-	runID     int64
-	updaterID int64
-	updRunID  int64
+	updaterRun
 }
 
 // NewDelta starts a "delta" updater run.
@@ -41,58 +31,18 @@ type UpdaterDeltaRun struct {
 // [UpdaterDeltaRun.Close] is called.
 func (r *Run) NewDelta(ctx context.Context, ref uuid.UUID, updater string) (*UpdaterDeltaRun, error) {
 	const method = `Run.NewDelta`
-	u := UpdaterDeltaRun{
-		runID:       r.runid,
-		updaterName: updater,
-	}
+	var u UpdaterDeltaRun
 	ctx, u.span = tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindInternal), trace.WithLinks(r.link))
+	defer u.span.End()
 	u.link = []trace.Link{
 		r.link,
 		trace.LinkFromContext(ctx, attrUpdRunName.String(updater), attrUpdRunRef.String(ref.String())),
 	}
-	var ok bool
-	var err error
-	defer func() {
-		if ok {
-			return
-		}
+
+	if err := u.init(ctx, r, ref, updater); err != nil {
+		err = prefixedErr(method)("unable to create run: %w", err)
 		u.span.RecordError(err)
 		u.span.SetStatus(codes.Error, err.Error())
-		u.span.End()
-		if u.tx != nil {
-			err = errors.Join(err, u.tx.Rollback(ctx))
-		}
-		err = fmt.Errorf(errPre+method+": unable to create run: %w", err)
-	}()
-
-	opt := pgx.TxOptions{
-		IsoLevel:   pgx.RepeatableRead,
-		AccessMode: pgx.ReadWrite,
-	}
-	err = pgx.BeginTxFunc(ctx, r.pool, opt, func(tx pgx.Tx) (err error) {
-		// NB these are all write queries.
-		err = tx.QueryRow(ctx, matcherGetUpdaterID, updater).
-			Scan(&u.updaterID)
-		if err != nil {
-			return fmt.Errorf("updater ID: %w", err)
-		}
-		err = tx.QueryRow(ctx, matcherCreateUpdaterRun, ref, u.updaterID, u.runID).
-			Scan(&u.updRunID)
-		if err != nil {
-			return fmt.Errorf("updater_run ID: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	u.tx, err = r.pool.BeginTx(ctx, opt)
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := u.tx.Exec(ctx, `CALL matcher_v2_import.stage();`); err != nil {
 		return nil, err
 	}
 
@@ -100,7 +50,7 @@ func (r *Run) NewDelta(ctx context.Context, ref uuid.UUID, updater string) (*Upd
 	runtime.SetFinalizer(&u, func(u *UpdaterDeltaRun) {
 		panic(fmt.Sprintf("%s:%d: %T not closed", file, line, u))
 	})
-	ok = true
+	u.span.SetStatus(codes.Ok, "")
 	return &u, nil
 }
 
@@ -110,6 +60,7 @@ func (r *Run) NewDelta(ctx context.Context, ref uuid.UUID, updater string) (*Upd
 // advisory database state.
 func (u *UpdaterDeltaRun) Add(ctx context.Context, vs AddSeq) (err error) {
 	const method = `UpdaterDeltaRun.Add`
+	errorf := prefixedErr(method)
 	ctx, span := tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindInternal), trace.WithLinks(u.link...))
 	defer func() {
 		if err != nil {
@@ -124,7 +75,7 @@ func (u *UpdaterDeltaRun) Add(ctx context.Context, vs AddSeq) (err error) {
 	src := advisoryCopySource(ctx, vs)
 	ct, err := u.tx.CopyFrom(ctx, pgx.Identifier{`advisory_import`}, src.Names(), src)
 	if err != nil {
-		return fmt.Errorf(errPre+method+": %w", err)
+		return errorf("copying: %w", err)
 	}
 	zlog.Debug(ctx).
 		Int64("count", ct).
@@ -132,7 +83,7 @@ func (u *UpdaterDeltaRun) Add(ctx context.Context, vs AddSeq) (err error) {
 
 	_, err = u.tx.Exec(ctx, matcherUpdaterDeltaRunAdd, u.runID, u.updaterID, u.updRunID)
 	if err != nil {
-		return fmt.Errorf(errPre+method+": %w", err)
+		return errorf("adding: %w", err)
 	}
 	return nil
 }
@@ -141,6 +92,7 @@ func (u *UpdaterDeltaRun) Add(ctx context.Context, vs AddSeq) (err error) {
 // the next advisory database state.
 func (u *UpdaterDeltaRun) Remove(ctx context.Context, vs RemSeq) (err error) {
 	const method = `UpdaterDeltaRun.Remove`
+	errorf := prefixedErr(method)
 	ctx, span := tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindInternal), trace.WithLinks(u.link...))
 	defer func() {
 		if err != nil {
@@ -155,7 +107,7 @@ func (u *UpdaterDeltaRun) Remove(ctx context.Context, vs RemSeq) (err error) {
 	src := removeCopySource(ctx, vs)
 	ct, err := u.tx.CopyFrom(ctx, pgx.Identifier{`advisory_import`}, src.Names(), src)
 	if err != nil {
-		return fmt.Errorf(errPre+method+": %w", err)
+		return errorf("copying: %w", err)
 	}
 	zlog.Debug(ctx).
 		Int64("count", ct).
@@ -163,7 +115,7 @@ func (u *UpdaterDeltaRun) Remove(ctx context.Context, vs RemSeq) (err error) {
 
 	_, err = u.tx.Exec(ctx, matcherUpdaterDeltaRunRemove, u.runID, u.updaterID, u.updRunID)
 	if err != nil {
-		return fmt.Errorf(errPre+method+": %w", err)
+		return errorf("removing: %w", err)
 	}
 	return nil
 }
@@ -173,48 +125,16 @@ func (u *UpdaterDeltaRun) Finish(ctx context.Context, fp driver.Fingerprint, err
 	const method = `UpdaterDeltaRun.Finish`
 	ctx, span := tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindInternal), trace.WithLinks(u.link...))
 	defer span.End()
-	defer func() { u.tx = nil }()
-	status := u.tx.Conn().PgConn().TxStatus()
-	zlog.Debug(ctx).
-		Str("status", string(status)).
-		Msg("tx status")
-	switch status {
-	case 'E': // In failed transaction
-		// TODO(hank) Pull a new connection and update the status.
-		return errors.Join(u.tx.Rollback(ctx), err, u.err)
-	case 'T': // In transaction
-	case 'I': // Idle -- how?
-		err = errors.Join(err, errors.New("connection idle; extremely weird, please file a bug"))
-	default:
-		return fmt.Errorf(errPre+method+": unknown tx status: %c", status)
+	if err := u.finish(ctx, fp, err); err != nil {
+		return prefixedErr(method)("%w", err)
 	}
-
-	ret := make([]error, 2)
-
-	_, ret[0] = u.tx.Exec(ctx, matcherUpdaterRunFinish,
-		u.updRunID, fp, errors.Join(u.err, err))
-	if ret[0] != nil {
-		ret[1] = u.tx.Rollback(ctx)
-	} else {
-		ret[1] = u.tx.Commit(ctx)
-	}
-
-	return errors.Join(ret...)
+	return nil
 }
 
 // Close releases associated resources.
 //
 // If not called, the process may panic.
 func (u *UpdaterDeltaRun) Close() error {
-	defer u.span.End()
 	runtime.SetFinalizer(u, nil)
-	u.updaterID = -1
-	u.updRunID = -1
-	u.runID = -1
-	if u.tx != nil {
-		ctx, done := context.WithTimeout(context.Background(), 5*time.Second)
-		defer done()
-		return errors.Join(u.err, u.tx.Rollback(ctx))
-	}
-	return u.err
+	return u.close()
 }

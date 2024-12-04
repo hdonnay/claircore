@@ -78,14 +78,14 @@ $$;
 CREATE OR REPLACE PROCEDURE emit_log (kind TEXT, message TEXT, event JSONB) LANGUAGE plpgsql AS $$
 BEGIN
 	INSERT INTO matcher_v2_meta.log(kind, message, event) VALUES (kind, message, event);
-	RAISE INFO '%: % %', kind, message, event;
+	RAISE INFO '%: %', kind, message USING SCHEMA = 'matcher_v2_meta', TABLE = 'log', ERRCODE = 'LOG00', DETAIL = event::TEXT;
 END;
 $$;
 
 CREATE OR REPLACE PROCEDURE emit_log (kind TEXT, message TEXT) LANGUAGE plpgsql AS $$
 BEGIN
 	INSERT INTO matcher_v2_meta.log(kind, message, event) VALUES (kind, message, NULL);
-	RAISE INFO '%: %', kind, message;
+	RAISE INFO '%: %', kind, message USING SCHEMA = 'matcher_v2_meta', TABLE = 'log', ERRCODE = 'LOG00';
 END;
 $$;
 

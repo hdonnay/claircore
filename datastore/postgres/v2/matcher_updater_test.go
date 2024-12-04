@@ -45,7 +45,7 @@ func (*matcherSuite) Updater(ctx context.Context, t *testing.T, pool *pgxpool.Po
 				got := slices.Collect(testutil.FilterErrs(t, seq))
 				var b strings.Builder
 				for _, op := range got {
-					fmt.Fprintf(&b, "%s/%s@+%.4f: ", op.Updater, op.Ref, op.Date.Sub(start).Seconds())
+					fmt.Fprintf(&b, "%s/%s T+%.4f: ", op.Updater, op.Ref, op.Date.Sub(start).Seconds())
 					if op.Success {
 						b.WriteString("OK:  ")
 						b.WriteString(strconv.Quote(string(op.Fingerprint)))
@@ -118,7 +118,7 @@ func tescasesFromGlob(m *Matcher, glob string) iter.Seq[UpdaterTestcase] {
 	}
 }
 
-// UpdaterTestcase describes a subtest for the Delta Updater subsystem.
+// UpdaterTestcase describes a subtest for the Updater subsystem.
 type UpdaterTestcase struct {
 	Matcher *Matcher
 	Fixture string

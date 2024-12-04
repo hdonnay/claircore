@@ -40,7 +40,7 @@ const minMatcherMigration = 13
 func NewMatcherV2(ctx context.Context, matcher *pgxpool.Pool) (*Matcher, error) {
 	reg, err := o11y.CollectStats(matcher)
 	if err != nil {
-		return nil, fmt.Errorf(errPre+"unable to register metrics collection: %w", err)
+		return nil, errorf("unable to register metrics collection: %w", err)
 	}
 	var ok bool
 	defer func() {
@@ -56,7 +56,7 @@ func NewMatcherV2(ctx context.Context, matcher *pgxpool.Pool) (*Matcher, error) 
 
 	err = matcher.AcquireFunc(ctx, sanityCheck(ctx, &m.workMem, migrations.MatcherMigrationTable, minMatcherMigration))
 	if err != nil {
-		return nil, fmt.Errorf(errPre+"%w", err)
+		return nil, errorf("%w", err)
 	}
 
 	_, file, line, _ := runtime.Caller(1)
@@ -79,7 +79,7 @@ func (m *Matcher) Close() error {
 //
 // To emulate the previous behavior ...
 //
-// TODO(hank) Write this method.
+// BUG(hank) [Matcher.CollectGarbage] is not implemented.
 func (m *Matcher) CollectGarbage(ctx context.Context, dur time.Duration) error {
 	// For updaters in the work set, return the ones that have successful
 	// runs outside the work set
@@ -107,6 +107,8 @@ WITH work_set AS (SELECT id, updater FROM updater_v1.run WHERE run.date < (now()
 //
 // If "strict" is true, the method reports if the latest completed run finished
 // without errors and with the currently configured set of Updaters.
+//
+// BUG(hank) [Matcher.Initialized] does not implement "strict" mode.
 func (m *Matcher) Initialized(ctx context.Context, strict bool) (out bool, err error) {
 	if strict {
 		return false, errors.ErrUnsupported
@@ -118,7 +120,7 @@ func (m *Matcher) Initialized(ctx context.Context, strict bool) (out bool, err e
 
 // GetUpdateDiff ...
 //
-// TODO(hank) Write this method.
+// BUG(hank) [Matcher.GetUpdateDiff] is not implemented.
 func (m *Matcher) GetUpdateDiff(ctx context.Context, prev, cur uuid.UUID) (*driver.UpdateDiff, error) {
 	return nil, errors.ErrUnsupported
 }

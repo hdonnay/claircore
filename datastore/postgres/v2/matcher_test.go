@@ -63,11 +63,33 @@ func (*matcherSuite) Initialized(ctx context.Context, t *testing.T, pool *pgxpoo
 		t.Helper()
 		inner(zlog.Test(ctx, t), t, m, false, create)
 	})
-	// t.Run("Strict", func(t *testing.T) {
-	// 	const create = `INSERT INTO matcher_v2.run (ref, complete) VALUES ($1, TRUE);`
-	// 	t.Helper()
-	// 	inner(zlog.Test(ctx, t), t, m, true, create)
-	// })
+	t.Run("Strict", func(t *testing.T) {
+		t.Skip("TODO")
+		/*
+			const create = `INSERT INTO matcher_v2.run (ref, complete) VALUES ($1, TRUE);`
+			t.Helper()
+			inner(zlog.Test(ctx, t), t, m, true, create)
+		*/
+	})
+}
+
+func (*matcherSuite) CollectGarbage(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
+	t.Skip("TODO")
+	// m := mkMatcher(ctx, t, pool)
+
+	t.Run("Simple", func(t *testing.T) {
+		// - create some Updates
+		// - age them out
+		// - make sure they're deleted.
+		t.Skip("TODO")
+	})
+
+	t.Run("Partial", func(t *testing.T) {
+		// - create some Updates
+		// - age out some portion of the underlying objects
+		// - make sure they're deleted.
+		t.Skip("TODO")
+	})
 }
 
 // GetUpdateOperations tests [Matcher.GetUpdateOperations].

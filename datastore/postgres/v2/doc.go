@@ -66,8 +66,8 @@ Currently, this package uses a full PostgreSQL database because the harness alre
 */
 package postgres
 
-// TODO(hank) Keep an eye on the [AddCleanup] proposal and use it to replace the
-// [runtime.SetFinalizer] usage in this package.
+// BUG(hank) This package makes heavy usage of [runtime.SetFinalizer]. Keep an
+// eye on the [AddCleanup] proposal and use it instead.
 //
 // [AddCleanup]: https://github.com/golang/go/issues/67535
 
@@ -89,7 +89,7 @@ These should be handled in the new updater type hierarchy: matcher_updater.go
 - GetLatestUpdateRef(context.Context, driver.UpdateKind) (uuid.UUID, error)
 - DeleteUpdateOperations(context.Context, ...uuid.UUID) (int64, error)
 
-TODO
+TODO: matcher_updater.go
 
 The first 3 can probably be consolidated.
 
