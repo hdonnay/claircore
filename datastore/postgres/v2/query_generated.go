@@ -14,6 +14,8 @@ var (
 	initSelectWorkMem string
 	//go:embed query/matcher/BeginUpdaterRun.sql
 	matcherBeginUpdaterRun string
+	//go:embed query/matcher/CheckRetentionCount.sql
+	matcherCheckRetentionCount string
 	//go:embed query/matcher/CompleteRun.sql
 	matcherCompleteRun string
 	//go:embed query/matcher/CreateRun.sql
@@ -48,6 +50,7 @@ var NameLookup = map[unique.Handle[string]]string{
 	unique.Make(initSelectVersion):                 "SelectVersion",
 	unique.Make(initSelectWorkMem):                 "SelectWorkMem",
 	unique.Make(matcherBeginUpdaterRun):            "BeginUpdaterRun",
+	unique.Make(matcherCheckRetentionCount):        "CheckRetentionCount",
 	unique.Make(matcherCompleteRun):                "CompleteRun",
 	unique.Make(matcherCreateRun):                  "CreateRun",
 	unique.Make(matcherCreateUpdaterRun):           "CreateUpdaterRun",
@@ -69,6 +72,7 @@ var TableLookup = map[unique.Handle[string]]string{
 	unique.Make(initSelectVersion):      "libvuln_migrations",
 	unique.Make(initSelectWorkMem):      "pg_settings",
 	unique.Make(matcherBeginUpdaterRun): "updater_v1.run",
+	// matcherCheckRetentionCount: no obvious table
 	// matcherCompleteRun: no obvious table
 	// matcherCreateRun: no obvious table
 	// matcherCreateUpdaterRun: no obvious table
@@ -89,6 +93,7 @@ var OpLookup = map[unique.Handle[string]]string{
 	unique.Make(initSelectVersion):                 "SELECT",
 	unique.Make(initSelectWorkMem):                 "SELECT",
 	unique.Make(matcherBeginUpdaterRun):            "INSERT",
+	unique.Make(matcherCheckRetentionCount):        "SELECT",
 	unique.Make(matcherCompleteRun):                "SELECT",
 	unique.Make(matcherCreateRun):                  "SELECT",
 	unique.Make(matcherCreateUpdaterRun):           "SELECT",

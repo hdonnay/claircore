@@ -21,6 +21,10 @@ import (
 // given updater.
 //
 // UpdaterDeltaRun is not safe for concurrent use.
+//
+// BUG(hank) It might be OK to call [UpdaterDeltaRun.Add] and
+// [UpdaterDeltaRun.Remove] multiple times? The API needs to have an opinion on
+// this.
 type UpdaterDeltaRun struct {
 	updaterRun
 }
@@ -53,8 +57,6 @@ func (r *Run) NewDelta(ctx context.Context, ref uuid.UUID, updater string) (*Upd
 	u.span.SetStatus(codes.Ok, "")
 	return &u, nil
 }
-
-// It might be OK to call Add and Remove multiple times?
 
 // Add consumes the passed iterator and writes provided advisories into the next
 // advisory database state.

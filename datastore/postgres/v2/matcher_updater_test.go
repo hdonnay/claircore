@@ -77,7 +77,7 @@ func (*matcherSuite) Updater(ctx context.Context, t *testing.T, pool *pgxpool.Po
 			}
 		}
 
-		for tc := range tescasesFromGlob(m, "testdata/matcher/delta/*.txtar") {
+		for tc := range updaterTestcaseFromGlob(m, "testdata/matcher/delta/*.txtar") {
 			tc.RunDeltaFixture(ctx, t, &wantOps)
 			checkOps(ctx)(t)
 		}
@@ -85,7 +85,7 @@ func (*matcherSuite) Updater(ctx context.Context, t *testing.T, pool *pgxpool.Po
 		t.Run("Multiple", func(t *testing.T) {
 			ctx := zlog.Test(ctx, t)
 			resetOps(ctx)(t)
-			for tc := range tescasesFromGlob(m, "testdata/matcher/delta/multiple/*.txtar") {
+			for tc := range updaterTestcaseFromGlob(m, "testdata/matcher/delta/multiple/*.txtar") {
 				tc.RunDeltaFixture(ctx, t, &wantOps)
 			}
 			checkOps(ctx)(t)
@@ -94,16 +94,16 @@ func (*matcherSuite) Updater(ctx context.Context, t *testing.T, pool *pgxpool.Po
 
 	t.Run("Snapshot", func(t *testing.T) {
 		ctx := zlog.Test(ctx, t)
-		for tc := range tescasesFromGlob(m, "testdata/matcher/snapshot/*.txtar") {
+		for tc := range updaterTestcaseFromGlob(m, "testdata/matcher/snapshot/*.txtar") {
 			tc.RunSnapshotFixture(ctx, t, nil)
 		}
 	})
 }
 
-func tescasesFromGlob(m *Matcher, glob string) iter.Seq[UpdaterTestcase] {
+func updaterTestcaseFromGlob(m *Matcher, glob string) iter.Seq[UpdaterTestcase] {
 	ms, err := filepath.Glob(glob)
 	if err != nil {
-		panic(err)
+		panic(fmt.Sprintf("programmer error: %v", err))
 	}
 	return func(yield func(UpdaterTestcase) bool) {
 		for _, name := range ms {

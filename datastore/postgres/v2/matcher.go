@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"runtime"
-	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/quay/zlog"
 	"go.opentelemetry.io/otel/metric"
@@ -75,23 +76,13 @@ func (m *Matcher) Close() error {
 	return m.reg.Unregister()
 }
 
-// CollectGarbage removes all [Run]s older than the specified [time.Duration].
+// CollectGarbage removes all [Run]s beyond the configured number to keep.
 //
-// To emulate the previous behavior ...
-//
-// BUG(hank) [Matcher.CollectGarbage] is not implemented.
-func (m *Matcher) CollectGarbage(ctx context.Context, dur time.Duration) error {
-	// For updaters in the work set, return the ones that have successful
-	// runs outside the work set
-	//
-	// TODO(hank) Move to embed.
-	const query = `
-WITH work_set AS (SELECT id, updater FROM updater_v1.run WHERE run.date < (now() - interval $1)),
-     recent AS (SELECT updater, bool_or(success) AS success FROM updater_v1.run GROUP BY updater)
-	DELETE FROM run WHERE id IN (SELECT id FROM work_set JOIN recent USING updater WHERE success = TRUE);
-	`
+// BUG(hank) [Matcher.CollectGarbage] has no API to configure the retention
+// lifetime.
+func (m *Matcher) CollectGarbage(ctx context.Context) error {
 	return m.pool.AcquireFunc(ctx, func(c *pgxpool.Conn) error {
-		tag, err := c.Exec(ctx, query, dur)
+		tag, err := c.Exec(ctx, `CALL matcher_v2.run_gc();`)
 		if err != nil {
 			return err
 		}
@@ -120,7 +111,64 @@ func (m *Matcher) Initialized(ctx context.Context, strict bool) (out bool, err e
 
 // GetUpdateDiff ...
 //
+// The returned [driver.UpdateDifference] claims a database connection from the
+// pool, so a long-lived caller may cause resource exhaustion.
+//
 // BUG(hank) [Matcher.GetUpdateDiff] is not implemented.
-func (m *Matcher) GetUpdateDiff(ctx context.Context, prev, cur uuid.UUID) (*driver.UpdateDiff, error) {
+func (m *Matcher) GetUpdateDiff(ctx context.Context, prev, cur uuid.UUID) (driver.UpdateDifference, error) {
+	ct := -1
+	err := m.pool.
+		QueryRow(ctx, matcherCheckRetentionCount).
+		Scan(&ct)
+	if err != nil {
+		return nil, errorf("unable to check retention count: %w", err)
+	}
+	switch {
+	case ct < 1:
+		return nil, errorf(`database configuration for "retain_runs" is malformed: %w`, ErrDatabaseAppConfig)
+	case ct == 1:
+		return nil, ErrNoHistory
+	default:
+	}
+
+	// type UpdateDiff struct {
+	// 	Added, Removed iter.Seq2[Advisory, error]
+	// 	Prev, Cur      UpdateOperation
+	// }
+
 	return nil, errors.ErrUnsupported
+}
+
+var _ driver.UpdateDifference = (*updateDiffer)(nil)
+
+type updateDiffer struct {
+	matcher *Matcher
+	tx      pgx.Tx
+}
+
+// Added implements [driver.UpdateDifference].
+func (u *updateDiffer) Added(context.Context) (iter.Seq2[driver.Advisory, error], error) {
+	panic("unimplemented")
+}
+
+// Operations implements [driver.UpdateDifference].
+func (u *updateDiffer) Operations(context.Context) (prev driver.UpdateOperation, cur driver.UpdateOperation, err error) {
+	panic("unimplemented")
+}
+
+// Removed implements [driver.UpdateDifference].
+func (u *updateDiffer) Removed(context.Context) (iter.Seq2[driver.Advisory, error], error) {
+	panic("unimplemented")
+}
+
+// Close implements [driver.UpdateDifference].
+func (u *updateDiffer) Close() error {
+	switch s := u.tx.Conn().PgConn().TxStatus(); s {
+	case 'T': // OK
+	case 'I': // WTF
+	case 'E': // Errored
+	default: // WTF
+		panic("wtf")
+	}
+	panic("unimplemented")
 }
