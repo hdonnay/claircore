@@ -15,14 +15,17 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/exp/trace"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
+	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 
 	"github.com/quay/claircore/internal/xmlutil"
@@ -33,24 +36,85 @@ const (
 	Trace      = slog.LevelDebug - 4
 )
 
+var rec = trace.NewFlightRecorder()
+
 func main() {
 	ctx := context.Background()
 	var logLevel slog.LevelVar
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: &logLevel,
 	})))
-
-	debugFlag := flag.Bool("D", false, "debug logging")
-	traceFlag := flag.Bool("DD", false, "trace logging")
+	debugLogFlag := flag.Bool("D", false, "debug logging")
+	traceLogFlag := flag.Bool("DD", false, "trace logging")
+	traceFlag := flag.Bool("trace", false, "write execution trace when sent USR1")
 	flag.Parse()
 	switch {
-	case *debugFlag:
+	case *debugLogFlag:
 		logLevel.Set(slog.LevelDebug)
-	case *traceFlag:
+	case *traceLogFlag:
 		logLevel.Set(Trace)
 	}
 
-	if err := Main(ctx); err != nil {
+	var wg sync.WaitGroup
+	ctx, done := context.WithCancel(ctx)
+	ctx, stop := signal.NotifyContext(ctx, unix.SIGINT, unix.SIGTERM)
+	wg.Add(1)
+	// Create a goroutine that immediately restores the default signal handler,
+	// so ^C^C exits immediately.
+	go func() {
+		<-ctx.Done()
+		stop()
+		wg.Done()
+	}()
+
+	if *traceFlag {
+		rec.SetSize(16 << 20)
+		usr1 := make(chan os.Signal, 1)
+		signal.Notify(usr1, unix.SIGUSR1)
+		wg.Add(2)
+		go func() {
+			// On context cancellation, stop listening for USR1 and close the
+			// channel relaying that signal.
+			<-ctx.Done()
+			signal.Stop(usr1)
+			rec.Stop()
+			close(usr1)
+			wg.Done()
+		}()
+		go func() {
+			// Read from the USR1 relay channel until closed.
+			// Context cancellation is propagated from the above goroutine.
+			defer wg.Done()
+			n := 0
+			for range usr1 {
+				name := fmt.Sprintf("trace.out.%04d", n)
+				l := slog.With("name", name)
+				f, err := os.Create(name)
+				if err != nil {
+					l.ErrorContext(ctx, "unable to create trace output", "error", err)
+					continue
+				}
+				n++
+				if _, err := rec.WriteTo(f); err != nil {
+					l.ErrorContext(ctx, "unable to write trace output", "error", err)
+				}
+				if err := f.Close(); err != nil {
+					l.ErrorContext(ctx, "unable to close trace output", "error", err)
+				}
+				l.InfoContext(ctx, "wrote trace output")
+			}
+		}()
+		rec.Start()
+	}
+
+	var err error
+	go func() {
+		defer done()
+		err = Main(ctx)
+	}()
+
+	wg.Wait()
+	if err != nil {
 		os.Exit(1)
 	}
 }
