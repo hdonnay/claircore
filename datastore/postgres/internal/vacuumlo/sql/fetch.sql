@@ -1,0 +1,1 @@
+FETCH FORWARD 1000 IN myportal;
