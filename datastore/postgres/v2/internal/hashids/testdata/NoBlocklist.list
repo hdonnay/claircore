@@ -1,0 +1,10 @@
+# alphabet: abc
+# min: 32
+# blocklist: []
+cabcaacbacbacbacbacbacbacbacbacb
+bbabbbbbcbcccaacbacbacbacbacbacb
+aabcaaaaacaccccbbcabcabcabcabcab
+cccbbcbbbcbbbcccaacbacbacbacbacb
+bbccabbbbbcbcccccaacbacbacbacbac
+aabacaccaaacccacccbbcabcabcabcab
+cccabbcbbbcbbbccccaacbacbacbacba
