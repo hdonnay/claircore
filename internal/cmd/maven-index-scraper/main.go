@@ -1,34 +1,28 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
-	"iter"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
-	"path"
-	"slices"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/exp/trace"
-	"golang.org/x/net/html"
-	"golang.org/x/net/html/atom"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
-
-	"github.com/quay/claircore/internal/xmlutil"
 )
 
 const (
@@ -44,9 +38,14 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: &logLevel,
 	})))
+
+	var databasePath string
+	var indexRoot string
 	debugLogFlag := flag.Bool("D", false, "debug logging")
 	traceLogFlag := flag.Bool("DD", false, "trace logging")
 	traceFlag := flag.Bool("trace", false, "write execution trace when sent USR1")
+	flag.StringVar(&databasePath, "db", "index.db", "current state database")
+	flag.StringVar(&indexRoot, "index", `https://repo.maven.apache.org/maven2/.index/`, "index root URL")
 	flag.Parse()
 	switch {
 	case *debugLogFlag:
@@ -110,7 +109,19 @@ func main() {
 	var err error
 	go func() {
 		defer done()
-		err = Main(ctx)
+		var root *url.URL
+		root, err = url.Parse(indexRoot)
+		if err != nil {
+			return
+		}
+
+		var db *DB
+		db, err = OpenDB(ctx, databasePath)
+		if err != nil {
+			return
+		}
+		defer db.Close()
+		err = Main(ctx, db, root)
 	}()
 
 	wg.Wait()
@@ -119,333 +130,143 @@ func main() {
 	}
 }
 
-func Main(ctx context.Context) error {
-	db, err := OpenDB(ctx, "maven.db")
+func Main(ctx context.Context, db *DB, root *url.URL) error {
+	client := new(http.Client)
+	cur := NewHTTPResource(client, root)
+
+	ir, err := NewIndexReader(ctx, db, cur)
 	if err != nil {
+		slog.ErrorContext(ctx, "unable to create index reader", "error", err)
 		return err
 	}
-	defer db.Close()
+	slog.InfoContext(ctx, "attempting index update", "incremental", ir.CanIncremental())
 
-	s, err := NewIndexScraper(scraperoot)
-	if err != nil {
-		slog.ErrorContext(ctx, "unable to create index scraper", "error", err)
-		return err
-	}
-
-	lastUpdated, err := s.LastUpdated(ctx)
-	if err != nil {
-		slog.ErrorContext(ctx, "unable to fetch updated", "error", err)
-		return err
-	}
-	slog.InfoContext(ctx, "index update time", "at", lastUpdated)
-	lastFetched, err := db.ReadLastUpdated(ctx)
-	if err != nil {
-		slog.ErrorContext(ctx, "unable to read last_updated", "error", err)
-		return err
-	}
-	slog.InfoContext(ctx, "last fetch time", "at", lastFetched)
-
-	dur := lastUpdated.Sub(lastFetched)
-	slog.InfoContext(ctx, "fetch delta", "ago", dur)
-	if dur < (time.Hour * 12) {
-		slog.InfoContext(ctx, "new enough, done")
-		return nil
-	}
-
-	n := 0
-	seq, errFunc := s.Metadata(ctx)
-	for u, m := range seq {
-		fmt.Printf("%v\t%#+v\n", u, m)
-		if n++; n == 10 {
-			break
-		}
-	}
-	if err := errFunc(); err != nil {
-		slog.ErrorContext(ctx, "error walking index", "error", err)
-		return err
-	}
-
-	return nil
-}
-
-type IndexScraper struct {
-	bufs sync.Pool
-	c    *http.Client
-	toks chan struct{}
-	root *url.URL
-}
-
-func NewIndexScraper(root string) (*IndexScraper, error) {
-	u, err := url.Parse(root)
-	if err != nil {
-		return nil, err
-	}
-	s := IndexScraper{
-		c:    &http.Client{},
-		toks: make(chan struct{}, 4),
-		root: u,
-	}
-	return &s, nil
-}
-
-func (s *IndexScraper) getbuf() *bytes.Buffer {
-	v := s.bufs.Get()
-	if v == nil {
-		const startSz = 1 << 16
-		b := new(bytes.Buffer)
-		b.Grow(startSz)
-		v = b
-	}
-	return v.(*bytes.Buffer)
-}
-
-func (s *IndexScraper) putbuf(buf *bytes.Buffer) {
-	const tooBig = 1 << 20
-	if buf.Len() >= tooBig {
-		return
-	}
-	buf.Reset()
-	s.bufs.Put(buf)
-}
-
-func (s *IndexScraper) lim(ctx context.Context) (func(), error) {
-	t := time.Now()
-	select {
-	case <-ctx.Done():
-		return nil, context.Cause(ctx)
-	case s.toks <- struct{}{}:
-		slog.Log(ctx, Trace, "got token", "waited", time.Since(t))
-	}
-
-	return func() { <-s.toks }, nil
-}
-
-func (s *IndexScraper) httpGet(ctx context.Context, u *url.URL) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	done, err := s.lim(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer done()
-
-	slog.Log(ctx, Trace, "http request", "url", u)
-	res, err := s.c.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%q: unexpected status: %v", u, res.Status)
-	}
-	return res, nil
-}
-
-func (s *IndexScraper) httpLoad(ctx context.Context, b *bytes.Buffer, u *url.URL) error {
-	res, err := s.httpGet(ctx, u)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if _, err := io.Copy(b, res.Body); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-type MatchFunc func(ps []string, tgt string) (ok bool, err error)
-
-func (s *IndexScraper) walk(ctx context.Context, match MatchFunc, yield func(*url.URL) bool, ps []string) error {
-	b := s.getbuf()
-	defer s.putbuf(b)
-	if err := s.httpLoad(ctx, b, s.root.JoinPath(ps...)); err != nil {
-		return err
-	}
-	rd, err := newPageReader(ctx, b)
-	if err != nil {
-		return err
-	}
-
-	links := slices.Collect(rd.Links())
-	links = slices.DeleteFunc(links, func(tgt string) bool {
-		return tgt == "./" || tgt == "../"
-	})
-	slices.SortFunc(links, func(a, b string) int {
-		aIsDir := strings.HasSuffix(a, "/")
-		bIsDir := strings.HasSuffix(b, "/")
-		switch {
-		case aIsDir && !bIsDir:
-			return 1
-		case !aIsDir && bIsDir:
-			return -1
-		}
-		return strings.Compare(a, b)
-	})
-
-	for _, tgt := range links {
-		ok, err := match(ps, tgt)
-		slog.DebugContext(ctx, "walk", "path", path.Join(ps...), "tgt", tgt, "ok", ok, "err", err)
-		switch {
-		case errors.Is(err, fs.SkipDir):
-		case err != nil:
-			return err
-		case strings.HasSuffix(tgt, "/"):
-			if err := s.walk(ctx, match, yield, append(ps, tgt)); err != nil {
+	eg, ctx := errgroup.WithContext(ctx)
+	ch := make(chan Record, runtime.NumCPU())
+	eg.Go(func() error {
+		defer close(ch)
+		for cr, err := range ir.Chunks(ctx) {
+			if err != nil {
+				slog.ErrorContext(ctx, "unable to read chunk", "error", err)
 				return err
 			}
-		default:
-		}
-		if ok {
-			u := s.root.JoinPath(append(ps, tgt)...)
-			if !yield(u) {
-				return fs.SkipAll
-			}
-		}
-
-		if errors.Is(err, fs.SkipDir) {
-			break
-		}
-	}
-
-	if err := rd.Err(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *IndexScraper) Metadata(ctx context.Context) (iter.Seq2[*url.URL, Metadata], func() error) {
-	var seqErr error
-	findMetadata := func(yield func(*url.URL) bool) {
-		match := func(ps []string, tgt string) (bool, error) {
-			if tgt == `maven-metadata.xml` {
-				return true, fs.SkipDir
-			}
-			return false, nil
-		}
-		seqErr = errors.Join(seqErr, s.walk(ctx, match, yield, make([]string, 0, 5)))
-	}
-
-	seq := func(yield func(*url.URL, Metadata) bool) {
-		for md := range findMetadata {
-			var m Metadata
-
-			u, _ := md.Parse(".")
-			err := func() error {
-				res, err := s.httpGet(ctx, md)
+			for r, err := range cr.JARs() {
 				if err != nil {
+					slog.ErrorContext(ctx, "unable to read record", "error", err)
 					return err
 				}
-				defer res.Body.Close()
-				dec := xml.NewDecoder(res.Body)
-				dec.CharsetReader = xmlutil.CharsetReader
-				return dec.Decode(&m)
-			}()
-			if err != nil {
-				seqErr = errors.Join(seqErr, err)
-				return
-			}
-			if len(m.Versioning.Versions) == 0 {
-				slog.InfoContext(ctx, "skipping directory", "url", u)
-				continue
-			}
-			slog.InfoContext(ctx, "found directory", "url", u)
-			if !yield(u, m) {
-				return
-			}
-		}
-	}
-
-	return seq, func() error {
-		if seqErr == nil || errors.Is(seqErr, fs.SkipAll) {
-			return nil
-		}
-		return seqErr
-	}
-}
-
-func (s *IndexScraper) LastUpdated(ctx context.Context) (time.Time, error) {
-	p := `last_updated.txt` // Wed Mar 19 15:15:59 UTC 2025
-	b := s.getbuf()
-	defer s.putbuf(b)
-	if err := s.httpLoad(ctx, b, s.root.JoinPath(p)); err != nil {
-		return time.Time{}, err
-	}
-	value := strings.TrimSpace(b.String())
-	return time.Parse(time.UnixDate, value)
-}
-
-func newPageReader(ctx context.Context, r io.Reader) (*pageReader, error) {
-	p := pageReader{
-		ctx: ctx,
-		tok: html.NewTokenizer(r),
-	}
-
-	return &p, nil
-}
-
-type pageReader struct {
-	ctx context.Context
-	tok *html.Tokenizer
-	err error
-}
-
-func (p *pageReader) Err() error {
-	if p.err != nil {
-		return p.err
-	}
-	return nil
-}
-
-func (p *pageReader) Links() iter.Seq[string] {
-	return func(yield func(string) bool) {
-	Next:
-		for ty := p.tok.Next(); ty != html.ErrorToken; ty = p.tok.Next() {
-			if ty != html.StartTagToken {
-				continue
-			}
-			name, hasAttr := p.tok.TagName()
-			if atom.Lookup(name) != atom.A || !hasAttr {
-				continue
-			}
-			for {
-				k, v, more := p.tok.TagAttr()
-				if atom.Lookup(k) == atom.Href {
-					if !yield(string(v)) {
-						return
-					}
-					continue Next
-				}
-				if !more {
-					break
+				select {
+				case <-ctx.Done():
+					return context.Cause(ctx)
+				case ch <- r:
 				}
 			}
 		}
-		err := p.tok.Err()
-		if !errors.Is(err, io.EOF) {
-			p.err = fmt.Errorf("unexpected error reading page: %w", err)
+		return nil
+	})
+	eg.Go(func() error {
+		ct := 0
+		start := time.Now()
+		for r := range ch {
+			if err := db.WriteRecord(ctx, r); err != nil {
+				return err
+			}
+			ct++
+			if ct&0x0f == 0 {
+				slog.Log(ctx, Trace, "writing records", "count", ct)
+			}
+			if ct&0x03ff == 0 {
+				rps := float64(ct) / time.Since(start).Seconds()
+				slog.InfoContext(ctx, "writing records", "count", ct, "records_per_second", rps)
+			}
 		}
-	}
-}
+		return nil
+	})
 
-const dbSetup = `--
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS maven (
-	groupId TEXT,
-	artifactId TEXT,
-	version TEXT,
-	sha1 BLOB
-);
-`
+	// TODO(hank): write back index state
+
+	return eg.Wait()
+}
 
 type DB struct {
 	*sql.DB
 }
 
+// Exists implements Resource.
+func (db *DB) Exists(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+// Open implements Resource.
+func (db *DB) Open(context.Context, string) (io.ReadCloser, error) {
+	return nil, fs.ErrNotExist
+}
+
+// Index implements Resource.
+func (db *DB) Index(ctx context.Context) (Index, error) {
+	rows, err := db.QueryContext(ctx, `SELECT key, value FROM meta;`)
+	switch {
+	case err == nil:
+	case errors.Is(err, sql.ErrNoRows):
+		return Index{}, nil
+	default:
+		return Index{}, err
+	}
+	defer rows.Close()
+
+	var i Index
+	var key, value string
+	for rows.Next() {
+		if err := rows.Scan(&key, &value); err != nil {
+			return Index{}, err
+		}
+		switch key {
+		case `id`:
+			i.ID = value
+		case `creation`:
+			i.Creation, err = time.Parse(time.RFC3339, value)
+		case `published`:
+			i.Published, err = time.Parse(time.RFC3339, value)
+		case `chain`:
+			i.Chain = value
+		case `last`:
+			i.Last, err = strconv.Atoi(value)
+		case `incremental`:
+			for _, v := range strings.Split(value, ",") {
+				var n int
+				n, err = strconv.Atoi(v)
+				if err != nil {
+					break
+				}
+				i.Incremental = append(i.Incremental, n)
+			}
+		}
+		if err != nil {
+			return Index{}, err
+		}
+	}
+
+	return i, rows.Err()
+}
+
 func OpenDB(ctx context.Context, f string) (*DB, error) {
-	db, err := sql.Open("sqlite", "file:"+f)
+	const dbSetup = `--
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS repository (
+	groupId TEXT,
+	artifactId TEXT,
+	version TEXT,
+	sha1 BLOB,
+	sha256 BLOB,
+	UNIQUE (groupId, artifactId, version) ON CONFLICT IGNORE,
+	UNIQUE (sha1) ON CONFLICT REPLACE,
+	UNIQUE (sha256) ON CONFLICT REPLACE
+);
+PRAGMA cache_size = 1048576; -- 1GiB of RAM
+PRAGMA journal_mode = MEMORY;
+PRAGMA locking_mode = EXCLUSIVE;
+`
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s", f))
 	if err != nil {
 		slog.ErrorContext(ctx, "unable to open database", "error", err)
 		return nil, err
@@ -456,6 +277,16 @@ func OpenDB(ctx context.Context, f string) (*DB, error) {
 	}
 
 	return &DB{db}, nil
+}
+
+func (db *DB) WriteRecord(ctx context.Context, r Record) error {
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO repository (groupId, artifactId, version, sha1, sha256) VALUES (?,?,?,?,?);`,
+		r.GroupID, r.ArtifactID, r.Version, r.SHA1, r.SHA256)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (db *DB) ReadLastUpdated(ctx context.Context) (time.Time, error) {
