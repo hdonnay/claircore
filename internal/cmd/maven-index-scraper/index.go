@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -152,25 +151,19 @@ func (i *IndexReader) fullIndex(ctx context.Context) iter.Seq2[*ChunkReader, err
 			yield(nil, fmt.Errorf("unable to execute request: %w", err))
 			return
 		}
-		defer res.Body.Close()
 		switch res.StatusCode {
 		case http.StatusOK:
 		default:
+			res.Body.Close()
 			yield(nil, fmt.Errorf("unexpected response status: %s", res.Status))
 			return
 		}
-		z, err := gzip.NewReader(bufio.NewReaderSize(res.Body, 1<<20))
-		if err != nil {
-			yield(nil, err)
-			return
-		}
-		defer z.Close()
 
-		cr, err := NewChunkReader(z)
+		cr, err := NewChunkReader(0, res.Body)
 		if err != nil {
 			i.local.Last = i.remote.Last
 		}
-		slog.DebugContext(ctx, "full chunk reader created", "reader", cr, "error", err)
+		slog.DebugContext(ctx, "full chunk reader created", "error", err)
 		yield(cr, err)
 	}
 }
@@ -194,20 +187,15 @@ func (i *IndexReader) incrementalIndex(ctx context.Context) iter.Seq2[*ChunkRead
 				if err != nil {
 					return fmt.Errorf("unable to execute request: %w", err)
 				}
-				defer res.Body.Close()
 				switch res.StatusCode {
 				case http.StatusOK:
 				default:
+					res.Body.Close()
 					return fmt.Errorf("unexpected response status: %s", res.Status)
 				}
-				z, err := gzip.NewReader(bufio.NewReaderSize(res.Body, 1<<20))
-				if err != nil {
-					return err
-				}
-				defer z.Close()
 
-				cr, err := NewChunkReader(z)
-				slog.DebugContext(ctx, "incremental chunk reader created", "reader", cr, "error", err)
+				cr, err := NewChunkReader(n, res.Body)
+				slog.DebugContext(ctx, "incremental chunk reader created", "error", err)
 				if err != nil {
 					return err
 				}

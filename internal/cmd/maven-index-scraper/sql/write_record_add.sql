@@ -1,4 +1,4 @@
-INSERT INTO
-  to_add (groupId, artifactId, version, sha1, sha256)
+INSERT INTO lookup (artifact, version, sha1)
 VALUES
-  (?, ?, ?, ?, ?)
+  (?, ?, ?)
+	ON CONFLICT (sha1) DO UPDATE SET version = excluded.version

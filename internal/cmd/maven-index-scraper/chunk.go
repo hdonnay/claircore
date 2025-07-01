@@ -2,19 +2,33 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"expvar"
 	"fmt"
 	"io"
 	"iter"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
+
+type Artifact struct {
+	GroupID    string
+	ArtifactID string
+}
+
+type ExportRecord struct {
+	Artifact
+	Version string
+	SHA1    []byte
+}
 
 const (
 	fieldSeparator = `|`
@@ -29,7 +43,7 @@ const (
 	KindArtifactAdd
 )
 
-type Record struct {
+type ImportRecord struct {
 	Kind RecordKind
 
 	Modified      time.Time
@@ -42,15 +56,25 @@ type Record struct {
 	FileModified  time.Time
 	FileSize      int64
 	Name          string
-	Description   string
 	SHA1          []byte
-	SHA256        []byte
 	HasSources    bool
 	HasJavadoc    bool
 	HasSignature  bool
 }
 
-func (r *Record) GoString() string {
+func (r *ImportRecord) export() ExportRecord {
+	return ExportRecord{
+		Kind: r.Kind,
+		Artifact: Artifact{
+			GroupID:    r.GroupID,
+			ArtifactID: r.ArtifactID,
+		},
+		Version: r.Version,
+		SHA1:    slices.Clone(r.SHA1),
+	}
+}
+
+func (r *ImportRecord) GoString() string {
 	if r.Kind == KindInvalid {
 		return `Record{INVALID}`
 	}
@@ -82,10 +106,6 @@ func (r *Record) GoString() string {
 			b.WriteString(`, sha1:`)
 			b.WriteString(hex.EncodeToString(r.SHA1))
 		}
-		if r.SHA256 != nil {
-			b.WriteString(`, sha256:`)
-			b.WriteString(hex.EncodeToString(r.SHA256))
-		}
 	default:
 		panic("unreachable")
 	}
@@ -94,7 +114,7 @@ func (r *Record) GoString() string {
 	return b.String()
 }
 
-func (r *Record) parseUinfo(u string) error {
+func (r *ImportRecord) parseUinfo(u string) error {
 	if u == "" {
 		return nil
 	}
@@ -114,7 +134,7 @@ func (r *Record) parseUinfo(u string) error {
 	return nil
 }
 
-func (r *Record) parseInfo(i string) error {
+func (r *ImportRecord) parseInfo(i string) error {
 	if i == "" {
 		return nil
 	}
@@ -149,9 +169,7 @@ func (r *Record) parseInfo(i string) error {
 	return nil
 }
 
-func (r *Record) hasChecksum() bool {
-	return len(r.SHA1) == (160/8) || len(r.SHA256) == (256/8)
-}
+func (r *ImportRecord) hasChecksum() bool { return len(r.SHA1) == (160 / 8) }
 
 // All numbers in the index format are big endian.
 var be = binary.BigEndian
@@ -178,9 +196,18 @@ func parseTimestamp(s string) (time.Time, error) {
 	return time.UnixMilli(ts), nil
 }
 
-// NewChunkReader sets up a [Record] reader over the contents of "r".
-func NewChunkReader(r io.Reader) (*ChunkReader, error) {
-	rd := bufio.NewReaderSize(r, 1<<20)
+// NewChunkReader sets up a [ImportRecord] reader over the contents of "r", which is
+// assumed to be compressed.
+//
+// "Num" is used for reporting and does not affect processing
+func NewChunkReader(num int, rc io.ReadCloser) (*ChunkReader, error) {
+	const bufSz = 1 << 20
+	z, err := gzip.NewReader(bufio.NewReaderSize(rc, bufSz))
+	if err != nil {
+		return nil, err
+	}
+	rd := bufio.NewReaderSize(z, bufSz)
+
 	v, err := rd.ReadByte()
 	if err != nil {
 		return nil, err
@@ -193,25 +220,36 @@ func NewChunkReader(r io.Reader) (*ChunkReader, error) {
 		return nil, err
 	}
 
-	return &ChunkReader{
+	cr := ChunkReader{
+		rc:        rc,
+		z:         z,
 		rd:        rd,
 		Version:   int(v),
 		Timestamp: ts,
+		Number:    num,
 		step:      readRecord,
-	}, nil
+	}
+	cr.registerMetrics(num)
+
+	return &cr, nil
 }
 
 // ChunkReader ...
 type ChunkReader struct {
+	chunkMetrics
+
+	Version   int
+	Timestamp time.Time
+	Number    int
+
+	rc io.ReadCloser
+	z  *gzip.Reader
 	// The iterator is single-use because they it mutates this buffer.
 	//
 	// To remove this restriction, you'd need to have an [io.ReaderAt], which
 	// would make streaming data impossible, and the uncompressed data would
 	// need to be buffered. For the initial/full index, this is much too large.
 	rd *bufio.Reader
-
-	Version   int
-	Timestamp time.Time
 
 	// Records are read out via a little lexer state machine.
 	//
@@ -223,17 +261,59 @@ type ChunkReader struct {
 	// the fields should be skipped instead of read and processed.
 	fields int
 	// Out is the current record.
-	out Record
+	out ImportRecord
+}
+
+type chunkMetrics struct {
+	recordsTotal      expvar.Int
+	recordsDiscarded  expvar.Int
+	recordsAdd        expvar.Int
+	recordsRemove     expvar.Int
+	recordsDescriptor expvar.Int
+	recordsAllGroups  expvar.Int
+	recordsRootGroups expvar.Int
+	invalidSHA1       expvar.Int
+	notJar            expvar.Int
+	android           expvar.Int
+	missingChecksums  expvar.Int
+	bytesSkipped      expvar.Int
+}
+
+func (cm *chunkMetrics) registerMetrics(n int) {
+	name := fmt.Sprintf("chunk#%02d", n)
+	m := expvar.NewMap(name)
+	m.Set("bytes_skipped", &cm.bytesSkipped)
+
+	recordStats := new(expvar.Map)
+	recordStats.Set("total", &cm.recordsTotal)
+	recordStats.Set("discarded", &cm.recordsDiscarded)
+	recordStats.Set("type:add", &cm.recordsAdd)
+	recordStats.Set("type:remove", &cm.recordsRemove)
+	recordStats.Set("type:descriptor", &cm.recordsDescriptor)
+	recordStats.Set("type:all_groups", &cm.recordsAllGroups)
+	recordStats.Set("type:root_groups", &cm.recordsRootGroups)
+	m.Set("records", recordStats)
+
+	reason := new(expvar.Map)
+	reason.Set("invalid_sha1", &cm.invalidSHA1)
+	reason.Set("not_jar", &cm.notJar)
+	reason.Set("android", &cm.android)
+	reason.Set("missing_checksums", &cm.missingChecksums)
+	m.Set("skip_reason", reason)
 }
 
 // All returns an iterator of Add/Remove records contained in this index chunk.
-func (cr *ChunkReader) All(ctx context.Context) iter.Seq2[Record, error] {
-	return func(yield func(Record, error) bool) {
+func (cr *ChunkReader) All(ctx context.Context) iter.Seq2[ExportRecord, error] {
+	return func(yield func(ExportRecord, error) bool) {
+		defer func() {
+			cr.z.Close()
+			cr.rc.Close()
+		}()
 		for cr.step != nil {
 			cr.step = cr.step(ctx, cr, yield)
 		}
 		if cr.err != nil {
-			yield(Record{}, cr.err)
+			yield(ExportRecord{}, cr.err)
 		}
 	}
 }
@@ -292,7 +372,7 @@ func (cr *ChunkReader) readString(buf *strings.Builder, sz int) error {
 }
 
 // YieldRecord is the type used in the [ChunkReader.All] iterator.
-type yieldRecord func(Record, error) bool
+type yieldRecord func(ExportRecord, error) bool
 
 // StateFn is a lexer state.
 type stateFn func(context.Context, *ChunkReader, yieldRecord) stateFn
@@ -301,7 +381,7 @@ type stateFn func(context.Context, *ChunkReader, yieldRecord) stateFn
 //
 // Transitions to:
 //   - nil
-//   - readField
+//   - [readField]
 func readRecord(_ context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 	cr.fields, cr.err = cr.readInt()
 	switch {
@@ -312,14 +392,15 @@ func readRecord(_ context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 	default:
 		return nil
 	}
+	cr.recordsTotal.Add(1)
 	return readField
 }
 
 // ReadField decides whether this field should be read or skipped.
 //
 // Transitions to:
-//   - skipKey
-//   - readKey
+//   - [skipKey]
+//   - [readKey]
 func readField(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 	switch {
 	case cr.fields < 0:
@@ -340,8 +421,8 @@ func readField(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 //
 // Transitions to:
 //   - nil
-//   - skipValue
-//   - readValue
+//   - [skipValue]
+//   - [readValue]
 func readKey(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 	cr.rd.Discard(1) // Flags, ignored.
 	var sz int
@@ -372,7 +453,7 @@ func readKey(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 //
 // Transitions to:
 //   - nil
-//   - skipValue
+//   - [skipValue]
 func skipKey(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 	cr.rd.Discard(1) // Flags, ignored.
 	var sz int
@@ -381,6 +462,7 @@ func skipKey(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 		return nil
 	}
 	cr.rd.Discard(sz)
+	cr.bytesSkipped.Add(int64(sz))
 	return skipValue
 }
 
@@ -388,7 +470,7 @@ func skipKey(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 //
 // Transitions to:
 //   - nil
-//   - fieldDone
+//   - [fieldDone]
 func readValue(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 	var sz int
 	sz, cr.err = cr.readInt()
@@ -409,7 +491,7 @@ func readValue(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 //
 // Transitions to:
 //   - nil
-//   - fieldDone
+//   - [fieldDone]
 func skipValue(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 	var sz int
 	sz, cr.err = cr.readInt()
@@ -417,6 +499,7 @@ func skipValue(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 		return nil
 	}
 	cr.rd.Discard(sz)
+	cr.bytesSkipped.Add(int64(sz))
 	return fieldDone
 }
 
@@ -425,10 +508,15 @@ func skipValue(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 //
 // Transitions to:
 //   - nil
-//   - emitRecord
-//   - discardRecord
-//   - readField
+//   - [emitRecord]
+//   - [discardRecord]
+//   - [readField]
 func fieldDone(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
+	markDiscard := func(why *expvar.Int) {
+		cr.out.Kind = KindInvalid
+		cr.fields *= -1
+		why.Add(1)
+	}
 	switch {
 	case cr.fields == 0:
 		panic("unreachable")
@@ -444,11 +532,13 @@ func fieldDone(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 		cr.out.Modified, cr.err = parseTimestamp(cr.val.String())
 	case `del`:
 		cr.out.Kind = KindArtifactRemove
+		cr.recordsRemove.Add(1)
 		cr.err = cr.out.parseUinfo(cr.val.String())
 	case `n`:
 		cr.out.Name = cr.val.String()
 		if cr.out.Kind == KindInvalid {
 			cr.out.Kind = KindArtifactAdd
+			cr.recordsAdd.Add(1)
 		}
 	case `i`:
 		cr.err = cr.out.parseInfo(cr.val.String())
@@ -460,17 +550,15 @@ func fieldDone(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 		var err error
 		cr.out.SHA1, err = hex.DecodeString(cr.val.String())
 		if err != nil {
-			slog.DebugContext(ctx, "unable to decode hex", "name", cr.out.Name, "key", `1`, "value", &cr.val)
-			cr.out.Kind = KindInvalid
-			cr.fields *= -1
+			slog.Log(ctx, Trace, "unable to decode hex", "name", cr.out.Name, "key", `1`, "value", &cr.val)
+			markDiscard(&cr.invalidSHA1)
 		}
-	case `sha256`:
-		// Seemingly not populated?
-		var err error
-		cr.out.SHA256, err = hex.DecodeString(cr.val.String())
-		if err != nil {
-			slog.DebugContext(ctx, "unable to decode hex", "name", cr.out.Name, "key", `sha256`, "value", &cr.val)
-		}
+	case `DESCRIPTOR`:
+		markDiscard(&cr.recordsDescriptor)
+	case `allGroups`:
+		markDiscard(&cr.recordsAllGroups)
+	case `rootGroups`:
+		markDiscard(&cr.recordsRootGroups)
 	default:
 		// Skip
 	}
@@ -482,27 +570,27 @@ func fieldDone(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
 
 	// If "Classifier" is set, this is not an executable jar.
 	if cr.out.Classifier != "" {
-		cr.out.Kind = KindInvalid
-		cr.fields *= -1
+		markDiscard(&cr.notJar)
 	}
 	// If an Android archive, skip.
 	if cr.out.FileExtension == "aar" {
-		cr.out.Kind = KindInvalid
-		cr.fields *= -1
+		markDiscard(&cr.android)
 	}
 	// If some other artifact, skip.
 	if cr.out.FileExtension != "" && !strings.HasSuffix(cr.out.FileExtension, "ar") {
-		cr.out.Kind = KindInvalid
-		cr.fields *= -1
+		markDiscard(&cr.notJar)
 	}
 
 Done:
 	// What's happening with this record?
 	switch {
-	case cr.fields == 0 && cr.out.Kind != KindInvalid && cr.out.hasChecksum():
+	case cr.fields == 0 && cr.out.Kind == KindArtifactAdd && cr.out.hasChecksum():
+		fallthrough
+	case cr.fields == 0 && cr.out.Kind == KindArtifactRemove:
 		return emitRecord
-	case cr.fields == 0 && cr.out.Kind != KindInvalid && !cr.out.hasChecksum():
-		return discardRecord
+	case cr.fields == 0 && cr.out.Kind == KindArtifactAdd && !cr.out.hasChecksum():
+		cr.missingChecksums.Add(1)
+		fallthrough
 	case cr.fields == 0 && cr.out.Kind == KindInvalid:
 		return discardRecord
 	default:
@@ -512,25 +600,31 @@ Done:
 	return readField
 }
 
-// EmitRecord calls "yield".
+// EmitRecord calls "yield". Forwards to [resetState].
 //
 // Transitions to:
 //   - nil
-//   - readRecord
+//   - [readRecord]
 func emitRecord(ctx context.Context, cr *ChunkReader, yield yieldRecord) stateFn {
-	if !yield(cr.out, nil) {
+	if !yield(cr.out.export(), nil) {
 		return nil
 	}
-	return discardRecord(ctx, cr, nil)
+	return resetState(ctx, cr, nil)
 }
 
-// DiscardRecord resets the current record.
+// DiscardRecord discards the current record. Forwards to [resetState].
 //
 // Transitions to:
 //   - nil
-//   - readRecord
+//   - [readRecord]
 func discardRecord(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
-	cr.out = Record{}
+	cr.recordsDiscarded.Add(1)
+	return resetState
+}
+
+// Not a real state. Used for common logic at the end of record processing.
+func resetState(ctx context.Context, cr *ChunkReader, _ yieldRecord) stateFn {
+	cr.out = ImportRecord{}
 	cr.err = ctx.Err()
 	if cr.err != nil {
 		return nil
@@ -563,6 +657,7 @@ var skipKeys = map[string]struct{}{
 	"Require-Capability":                  {},
 	"Fragment-Host":                       {},
 	"Bundle-RequiredExecutionEnvironment": {},
+	"sha256":                              {}, // Never populated on maven central for some reason.
 }
 
 // List of keys that mean the record should be skipped.

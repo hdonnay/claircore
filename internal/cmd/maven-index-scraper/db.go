@@ -4,19 +4,52 @@ import (
 	"context"
 	"database/sql"
 	_ "embed" // for the sql queries
+	"encoding/csv"
+	"encoding/hex"
 	"errors"
+	"expvar"
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 )
+
+type Staging struct {
+	artifacts *csv.Writer
+	add       *csv.Writer
+	remove    *csv.Writer
+}
+
+func (s *Staging) Record(ctx context.Context, r ExportRecord) error {
+	rec := []string{r.GroupID, r.ArtifactID}
+	s.artifacts.Write(rec)
+	rec = append(rec, r.Version)
+	if r.SHA1 != nil {
+		rec = append(rec, hex.EncodeToString(r.SHA1))
+		s.add.Write(rec)
+	} else {
+		s.remove.Write(rec)
+	}
+	return nil
+}
 
 // DB is a wrapper over a SQlite database containing the index state.
 type DB struct {
 	*sql.DB
+
+	artifacts      strings.Builder
+	record         strings.Builder
+	add            *sql.Stmt
+	remove         *sql.Stmt
+	commit         *sql.Stmt
+	insertArtifact *sql.Stmt
+	added          expvar.Int
+	removed        expvar.Int
 }
 
 func OpenDB(ctx context.Context, f string) (*DB, error) {
-	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s", f))
+	name := fmt.Sprintf("file:%s", f)
+	db, err := sql.Open("sqlite", name)
 	if err != nil {
 		slog.ErrorContext(ctx, "unable to open database", "error", err)
 		return nil, err
@@ -25,28 +58,75 @@ func OpenDB(ctx context.Context, f string) (*DB, error) {
 		slog.ErrorContext(ctx, "unable to set up database", "error", err)
 		return nil, errors.Join(err, db.Close())
 	}
+	addStmt, err := db.PrepareContext(ctx, queryWriteRecordAdd)
+	if err != nil {
+		slog.ErrorContext(ctx, "unable to set up database", "error", err)
+		return nil, errors.Join(err, db.Close())
+	}
+	removeStmt, err := db.PrepareContext(ctx, queryWriteRecordRemove)
+	if err != nil {
+		slog.ErrorContext(ctx, "unable to set up database", "error", err)
+		return nil, errors.Join(err, db.Close())
+	}
+	commitStmt, err := db.PrepareContext(ctx, queryCommitRecords)
+	if err != nil {
+		slog.ErrorContext(ctx, "unable to set up database", "error", err)
+		return nil, errors.Join(err, db.Close())
+	}
+	insertArtifactStmt, err := db.PrepareContext(ctx, queryInsertArtifact)
+	if err != nil {
+		slog.ErrorContext(ctx, "unable to set up database", "error", err)
+		return nil, errors.Join(err, db.Close())
+	}
 
-	return &DB{db}, nil
+	r := DB{
+		DB: db,
+
+		add:            addStmt,
+		remove:         removeStmt,
+		commit:         commitStmt,
+		insertArtifact: insertArtifactStmt,
+	}
+	m := new(expvar.Map)
+	nv := new(expvar.String)
+	nv.Set(name)
+	m.Set("filename", nv)
+	m.Set("added", &r.added)
+	m.Set("removed", &r.removed)
+	expvar.Publish("database", m)
+
+	return &r, nil
 }
 
-func (db *DB) WriteRecord(ctx context.Context, r Record) error {
-	// TODO(hank) Support removal records.
+func (db *DB) WriteRecord(ctx context.Context, r ExportRecord) error {
 	_, err := db.ExecContext(ctx,
-		queryWriteRecordAdd,
-		r.GroupID, r.ArtifactID, r.Version, r.SHA1, r.SHA256)
+		`INSERT INTO artifact (groupId, artifactId) VALUES (? ,?) ON CONFLICT DO NOTHING`,
+		r.ArtifactID, r.GroupID,
+	)
 	if err != nil {
 		return err
 	}
+	if r.SHA1 != nil {
+		db.added.Add(1)
+		_, err = db.ExecContext(ctx,
+			`INSERT INTO lookup (artifact, version, sha1) SELECT id, ?, ? FROM artifact WHERE groupId = ? AND artifactId = ? ON CONFLICT (sha1) DO UPDATE SET version = excluded.version`,
+			r.Version, r.SHA1, r.ArtifactID, r.GroupID,
+		)
+	} else {
+		db.removed.Add(1)
+		_, err = db.ExecContext(ctx,
+			`WITH a AS (SELECT id FROM artifact WHERE groupId = ? AND artifactId = ?) DELETE FROM lookup WHERE artifact = a.id AND version = ?`,
+			r.ArtifactID, r.GroupID, r.Version,
+		)
+	}
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func (db *DB) CommitRecords(ctx context.Context) error {
-	_, err := db.ExecContext(ctx, queryCommitRecords)
-	if err != nil {
-		return err
-	}
-	return nil
-}
+var ErrCommitRunning = errors.New("commit already running")
 
 func (db *DB) ReadChainID(ctx context.Context) (string, error) {
 	const key = `chain-id`
@@ -101,6 +181,8 @@ func (db *DB) writeMeta(ctx context.Context, key, value string) error {
 }
 
 var (
+	//go:embed sql/insert_artifact.sql
+	queryInsertArtifact string
 	//go:embed sql/setup.sql
 	querySetup string
 	//go:embed sql/write_record_add.sql

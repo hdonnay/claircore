@@ -1,26 +1,49 @@
+-- Assign any new artifact IDs needed.
 INSERT INTO
-  repository
+  artifact (groupId, artifactId)
 SELECT
-  *
+  groupId,
+  artifactId
 FROM
-  to_add
+  todo
 WHERE
-  true ON CONFLICT (sha1) DO NOTHING ON CONFLICT (sha256) DO NOTHING ON CONFLICT (groupId, artifactId, version) DO
-UPDATE
-SET
-  sha1 = COALESCE(excluded.sha1, sha1),
-  sha256 = COALESCE(excluded.sha256, sha256);
+  addition = TRUE ON CONFLICT DO NOTHING;
 
-DELETE FROM to_add;
-
-DELETE FROM repository
+-- Issue any deletes corresponding to removals.
+--
+-- Removals within the queued chunk should already be "done" because a later
+-- removal overwrote the addiiton, and the lone removal record just gets ignored here.
+DELETE FROM lookup
 WHERE
-  ROWID IN (
+  rowid IN (
     SELECT
-      r.ROWID
+      lookup.rowid
     FROM
-      repository AS r
-      INNER JOIN to_remove USING (groupId, artifactId, version)
+      todo
+      JOIN artifact USING (groupId, artifactId)
+      JOIN lookup ON (
+        lookup.artifact = artifact.id
+        AND lookup.version = todo.version
+      )
+    WHERE
+      todo.addition = FALSE
   );
 
-DELETE FROM to_remove;
+-- Insert net-new lookup entries.
+INSERT INTO
+  lookup (artifact, version, sha1)
+SELECT
+  artifact.id,
+  todo.version,
+  todo.sha1
+FROM
+  todo
+  JOIN artifact USING (groupId, artifactId)
+WHERE
+  todo.addition = TRUE
+ON CONFLICT (sha1) DO NOTHING
+;
+
+DELETE FROM todo;
+
+PRAGMA optimize;

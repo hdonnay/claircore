@@ -1,28 +1,21 @@
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 
-CREATE TABLE IF NOT EXISTS repository (
+CREATE TABLE IF NOT EXISTS artifact (
+  id INTEGER PRIMARY KEY ASC, -- alias for rowid
   groupId TEXT NOT NULL,
   artifactId TEXT NOT NULL,
-  version TEXT NOT NULL,
-  sha1 BLOB UNIQUE,
-  sha256 BLOB UNIQUE,
-  UNIQUE (groupId, artifactId, version)
+  UNIQUE (groupId, artifactId)
 );
 
-CREATE TEMPORARY TABLE to_add (
-  groupId TEXT NOT NULL,
-  artifactId TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS lookup (
+  artifact INTEGER REFERENCES artifact (id) NOT NULL,
   version TEXT NOT NULL,
-  sha1 BLOB,
-  sha256 BLOB
-);
-
-CREATE TEMPORARY TABLE to_remove (
-  groupId TEXT NOT NULL,
-  artifactId TEXT NOT NULL,
-  version TEXT NOT NULL
+  sha1 BLOB UNIQUE NOT NULL,
+  UNIQUE (artifact, version)
 );
 
 PRAGMA journal_mode = MEMORY;
 
 PRAGMA locking_mode = EXCLUSIVE;
+
+-- PRAGMA optimize = 0x10002;

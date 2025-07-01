@@ -1,4 +1,1 @@
-INSERT INTO
-  to_remove (groupId, artifactId, verion)
-VALUES
-  (?, ?, ?)
+DELETE FROM lookup WHERE artifact = ? AND version = ?

@@ -4,10 +4,11 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"expvar"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
-	"math"
 	"net/url"
 	"os"
 	"os/signal"
@@ -39,6 +40,7 @@ func main() {
 	debugLogFlag := flag.Bool("D", false, "debug logging")
 	traceLogFlag := flag.Bool("DD", false, "trace logging")
 	traceFlag := flag.Bool("trace", false, "write execution trace when sent USR1")
+	wipeFlag := flag.Bool("w", false, "wipe database before starting")
 	flag.StringVar(&databasePath, "db", "index.db", "current state database")
 	flag.StringVar(&indexRoot, "index", `https://repo.maven.apache.org/maven2/.index/`, "index root URL")
 	flag.StringVar(&chainOverride, "override-chainid", "", "override the chain id stored in the database (pass \"-\" to forcibly reset)")
@@ -113,6 +115,16 @@ func main() {
 			return
 		}
 
+		if *wipeFlag {
+			err = os.Remove(databasePath)
+			switch {
+			case err == nil:
+			case errors.Is(err, fs.ErrNotExist):
+			default:
+				return
+			}
+		}
+
 		var db *DB
 		db, err = OpenDB(ctx, databasePath)
 		if err != nil {
@@ -154,68 +166,100 @@ func Main(ctx context.Context, db *DB, cur LocalState, root *url.URL) error {
 	slog.InfoContext(ctx, "attempting index update", "incremental", ir.Incremental())
 
 	eg, egCtx := errgroup.WithContext(ctx)
-	ch := make(chan Record, runtime.NumCPU())
+	ch := make(chan ExportRecord, runtime.NumCPU()*8)
 
 	eg.Go(func() error {
 		defer close(ch)
-		for cr, err := range ir.Chunks(egCtx) {
+		eg, ctx := errgroup.WithContext(egCtx)
+		eg.SetLimit(min(runtime.GOMAXPROCS(0), 4))
+		n := 0
+		for cr, err := range ir.Chunks(ctx) {
 			if err != nil {
 				slog.ErrorContext(egCtx, "unable to read chunk", "error", err)
 				return err
 			}
-			for r, err := range cr.All(egCtx) {
-				if err != nil {
-					slog.ErrorContext(egCtx, "unable to read record", "error", err)
-					return err
+			n++
+			n := n // copy for the closure
+			eg.Go(func() error {
+				for r, err := range cr.All(ctx) {
+					if err != nil {
+						slog.ErrorContext(egCtx, "unable to read record", "error", err)
+						return err
+					}
+					select {
+					case <-ctx.Done():
+						return context.Cause(ctx)
+					case ch <- r:
+					}
 				}
-				select {
-				case <-egCtx.Done():
-					return context.Cause(egCtx)
-				case ch <- r:
-				}
-			}
+				slog.DebugContext(egCtx, "chunk done", "number", n)
+				return nil
+			})
 		}
-		return nil
+		return eg.Wait()
 	})
 	// Importer goroutine
 	eg.Go(func() error {
 		ct := 0
 		start := time.Now()
-		tick := time.NewTicker(30 * time.Second)
-		defer tick.Stop()
 		defer func() {
 			if ct == 0 { // Skip this if there were no chunks.
 				return
-			}
-			// Use the "outer" context here, on purpose.
-			if err := db.CommitRecords(ctx); err != nil {
-				slog.ErrorContext(ctx, "unexpected commit error while exiting", "error", err)
 			}
 			rps := float64(ct) / time.Since(start).Seconds()
 			slog.InfoContext(ctx, "wrote records", "count", ct, "records_per_second", rps)
 		}()
 	Recv:
 		for {
-			select {
-			case r, ok := <-ch:
-				if !ok {
-					break Recv
-				}
-				if err := db.WriteRecord(egCtx, r); err != nil {
-					return err
-				}
-				ct++
-			case <-tick.C:
-				rps := float64(ct) / time.Since(start).Seconds()
-				start := time.Now()
-				if err := db.CommitRecords(egCtx); err != nil {
-					return err
-				}
-				slog.InfoContext(egCtx, "committed records", "count", ct, "records_per_second", math.Round(rps), "commit_dur", time.Since(start))
+			r, ok := <-ch
+			if !ok {
+				break Recv
 			}
+			if err := db.WriteRecord(egCtx, r); err != nil {
+				return err
+			}
+			ct++
 		}
 		return nil
 	})
+	// Logging goroutine
+	go func() {
+		start := time.Now()
+		tick := time.NewTicker(30 * time.Second)
+		defer tick.Stop()
+		init := make(chan struct{})
+		close(init)
+		for {
+			select {
+			case <-egCtx.Done():
+				return
+			case <-tick.C:
+			case <-init:
+				init = nil
+			}
+			attrs := []slog.Attr{
+				slog.Duration("runtime", time.Since(start)),
+			}
+			expvar.Do(func(kv expvar.KeyValue) {
+				if kv.Key == `memstats` {
+					return
+				}
+				var a slog.Attr
+				switch v := kv.Value.(type) {
+				case *expvar.Int:
+					a = slog.Int64(kv.Key, v.Value())
+				case *expvar.Float:
+					a = slog.Float64(kv.Key, v.Value())
+				case *expvar.String:
+					a = slog.String(kv.Key, v.Value())
+				default:
+					a = slog.Any(kv.Key, v)
+				}
+				attrs = append(attrs, a)
+			})
+			slog.LogAttrs(ctx, slog.LevelInfo, "stats", attrs...)
+		}
+	}()
 
 	if err := eg.Wait(); err != nil {
 		return err
