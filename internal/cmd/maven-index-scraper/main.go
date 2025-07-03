@@ -3,12 +3,10 @@ package main
 import (
 	"cmp"
 	"context"
-	"errors"
-	"expvar"
 	"flag"
 	"fmt"
-	"io/fs"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"os/signal"
@@ -16,10 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/quay/claircore/internal/mavenindex"
 	"golang.org/x/exp/trace"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
-	_ "modernc.org/sqlite" // register the sqlite driver
 )
 
 const Trace = slog.LevelDebug - 4
@@ -40,10 +38,9 @@ func main() {
 	debugLogFlag := flag.Bool("D", false, "debug logging")
 	traceLogFlag := flag.Bool("DD", false, "trace logging")
 	traceFlag := flag.Bool("trace", false, "write execution trace when sent USR1")
-	wipeFlag := flag.Bool("w", false, "wipe database before starting")
-	flag.StringVar(&databasePath, "db", "index.db", "current state database")
+	flag.StringVar(&databasePath, "db", "repository.db", "SQLite database")
 	flag.StringVar(&indexRoot, "index", `https://repo.maven.apache.org/maven2/.index/`, "index root URL")
-	flag.StringVar(&chainOverride, "override-chainid", "", "override the chain id stored in the database (pass \"-\" to forcibly reset)")
+	flag.StringVar(&chainOverride, "override-chainid", "", "override the chain id in the SQLite database")
 	flag.IntVar(&lastIndexOverride, "override-lastindex", lastIndexOverride, "override the id of the last incremental updated consumed")
 	flag.Parse()
 	switch {
@@ -109,45 +106,33 @@ func main() {
 	var err error
 	go func() {
 		defer done()
-		var root *url.URL
-		root, err = url.Parse(indexRoot)
+		var remoteRoot *url.URL
+		remoteRoot, err = url.Parse(indexRoot)
 		if err != nil {
 			return
 		}
 
-		if *wipeFlag {
-			err = os.Remove(databasePath)
-			switch {
-			case err == nil:
-			case errors.Is(err, fs.ErrNotExist):
-			default:
-				return
-			}
-		}
-
-		var db *DB
-		db, err = OpenDB(ctx, databasePath)
+		var out *LocalIndex
+		out, err = NewLocalIndex(ctx, databasePath)
 		if err != nil {
 			return
 		}
-		defer db.Close()
-
-		var dbChain string
-		var dbIndex int
-		dbChain, err = db.ReadChainID(ctx)
+		var chain string
+		chain, err = out.ReadChainID(ctx)
 		if err != nil {
 			return
 		}
-		dbIndex, err = db.ReadLastIndex(ctx)
+		var last int
+		last, err = out.ReadLastIndex(ctx)
 		if err != nil {
 			return
 		}
 
-		cur := LocalState{
-			Chain: cmp.Or(chainOverride, dbChain),
-			Last:  cmp.Or(lastIndexOverride, dbIndex),
+		local := mavenindex.LocalState{
+			Chain: cmp.Or(chain, chainOverride),
+			Last:  cmp.Or(last, lastIndexOverride),
 		}
-		err = Main(ctx, db, cur, root)
+		err = Main(ctx, out, local, remoteRoot)
 	}()
 
 	wg.Wait()
@@ -157,8 +142,8 @@ func main() {
 	}
 }
 
-func Main(ctx context.Context, db *DB, cur LocalState, root *url.URL) error {
-	ir, err := NewIndexReader(ctx, cur, root)
+func Main(ctx context.Context, out *LocalIndex, local mavenindex.LocalState, remoteRoot *url.URL) error {
+	ir, err := mavenindex.NewIndexReader(ctx, local, remoteRoot)
 	if err != nil {
 		slog.ErrorContext(ctx, "unable to create index reader", "error", err)
 		return err
@@ -166,7 +151,12 @@ func Main(ctx context.Context, db *DB, cur LocalState, root *url.URL) error {
 	slog.InfoContext(ctx, "attempting index update", "incremental", ir.Incremental())
 
 	eg, egCtx := errgroup.WithContext(ctx)
-	ch := make(chan ExportRecord, runtime.NumCPU()*8)
+	ch := make(chan mavenindex.Record, runtime.NumCPU()*8)
+	defer func() {
+		if err := out.Close(ctx); err != nil {
+			slog.ErrorContext(ctx, "unable to close index writer", "error", err)
+		}
+	}()
 
 	eg.Go(func() error {
 		defer close(ch)
@@ -202,74 +192,53 @@ func Main(ctx context.Context, db *DB, cur LocalState, root *url.URL) error {
 	eg.Go(func() error {
 		ct := 0
 		start := time.Now()
+		tick := time.NewTicker(30 * time.Second)
+		defer tick.Stop()
+		emitLog := func() {
+			rps := math.Round(float64(ct) / time.Since(start).Seconds())
+			slog.InfoContext(ctx, "wrote records",
+				"count", ct,
+				"records_per_second", rps,
+				"runtime", time.Since(start).Round(time.Second),
+			)
+		}
 		defer func() {
-			if ct == 0 { // Skip this if there were no chunks.
-				return
+			if ct != 0 { // Skip this if there were no chunks.
+				emitLog()
 			}
-			rps := float64(ct) / time.Since(start).Seconds()
-			slog.InfoContext(ctx, "wrote records", "count", ct, "records_per_second", rps)
 		}()
+
 	Recv:
 		for {
-			r, ok := <-ch
-			if !ok {
-				break Recv
+			select {
+			case r, ok := <-ch:
+				if !ok {
+					break Recv
+				}
+				out.Enqueue(r)
+				ct++
+				if out.Len() > 16*1024 {
+					if err := out.Flush(ctx); err != nil {
+						return err
+					}
+				}
+			case <-tick.C:
+				emitLog()
 			}
-			if err := db.WriteRecord(egCtx, r); err != nil {
-				return err
-			}
-			ct++
+		}
+
+		if err := out.Flush(ctx); err != nil {
+			return err
 		}
 		return nil
 	})
-	// Logging goroutine
-	go func() {
-		start := time.Now()
-		tick := time.NewTicker(30 * time.Second)
-		defer tick.Stop()
-		init := make(chan struct{})
-		close(init)
-		for {
-			select {
-			case <-egCtx.Done():
-				return
-			case <-tick.C:
-			case <-init:
-				init = nil
-			}
-			attrs := []slog.Attr{
-				slog.Duration("runtime", time.Since(start)),
-			}
-			expvar.Do(func(kv expvar.KeyValue) {
-				if kv.Key == `memstats` {
-					return
-				}
-				var a slog.Attr
-				switch v := kv.Value.(type) {
-				case *expvar.Int:
-					a = slog.Int64(kv.Key, v.Value())
-				case *expvar.Float:
-					a = slog.Float64(kv.Key, v.Value())
-				case *expvar.String:
-					a = slog.String(kv.Key, v.Value())
-				default:
-					a = slog.Any(kv.Key, v)
-				}
-				attrs = append(attrs, a)
-			})
-			slog.LogAttrs(ctx, slog.LevelInfo, "stats", attrs...)
-		}
-	}()
 
 	if err := eg.Wait(); err != nil {
 		return err
 	}
 
 	// Write back the current index state.
-	if err := errors.Join(
-		db.WriteChainID(ctx, ir.ChainID()),
-		db.WriteLastIndex(ctx, ir.LastIndex()),
-	); err != nil {
+	if err := out.WriteLastIndex(ctx, ir.LastIndex()); err != nil {
 		return err
 	}
 

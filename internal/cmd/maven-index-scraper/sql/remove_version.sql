@@ -7,7 +7,7 @@ WHERE
       lookup
       JOIN artifact ON (artifact.id = lookup.artifact)
     WHERE
-      lookup.version = ?
-      AND artifact.groupId = ?
-      AND artifact.artifactId = ?
+      lookup.version = :version
+      AND artifact.groupId = :groupId
+      AND artifact.artifactId = :artifactId
   )

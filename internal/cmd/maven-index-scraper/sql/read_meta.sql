@@ -3,4 +3,4 @@ SELECT
 FROM
   meta
 WHERE
-  key = ?
+  key = :key

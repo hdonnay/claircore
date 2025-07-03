@@ -7,7 +7,8 @@ SELECT
 FROM
   todo
 WHERE
-  addition = TRUE ON CONFLICT DO NOTHING;
+  addition = TRUE
+ON CONFLICT DO NOTHING;
 
 -- Issue any deletes corresponding to removals.
 --
@@ -41,8 +42,7 @@ FROM
   JOIN artifact USING (groupId, artifactId)
 WHERE
   todo.addition = TRUE
-ON CONFLICT (sha1) DO NOTHING
-;
+ON CONFLICT (sha1) DO NOTHING;
 
 DELETE FROM todo;
 

@@ -10,12 +10,10 @@ CREATE TABLE IF NOT EXISTS artifact (
 CREATE TABLE IF NOT EXISTS lookup (
   artifact INTEGER REFERENCES artifact (id) NOT NULL,
   version TEXT NOT NULL,
-  sha1 BLOB UNIQUE NOT NULL,
-  UNIQUE (artifact, version)
 );
 
 PRAGMA journal_mode = MEMORY;
 
 PRAGMA locking_mode = EXCLUSIVE;
 
--- PRAGMA optimize = 0x10002;
+PRAGMA optimize = 0x10002;

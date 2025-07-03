@@ -2,10 +2,10 @@ INSERT OR REPLACE INTO
   lookup (artifact, version, sha1)
 SELECT
   artifact.id,
-  ?,
-  ?
+  :version,
+  :sha1
 FROM
   artifact
 WHERE
-  groupId = ?
-  AND artifactId = ?
+  groupId = :groupId
+  AND artifactId = :artifactId
