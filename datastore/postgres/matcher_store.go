@@ -13,7 +13,12 @@ import (
 	"github.com/quay/claircore/libvuln/driver"
 )
 
-// InitPostgresMatcherStore initialize a indexer.Store given libindex.Opts
+// InitPostgresMatcherStore initializes a [datastore.MatcherStore] with the
+// provided [pgxpool.Pool], running migrations if "doMigration" is true.
+//
+// Deprecated: Use [NewMatcherStore] with [migrations.Matcher] directly if needed.
+//
+//go:fix inline
 func InitPostgresMatcherStore(ctx context.Context, pool *pgxpool.Pool, doMigration bool) (datastore.MatcherStore, error) {
 	if doMigration {
 		if err := migrations.Matcher(ctx, pool.Config().ConnConfig); err != nil {
@@ -28,13 +33,17 @@ func InitPostgresMatcherStore(ctx context.Context, pool *pgxpool.Pool, doMigrati
 	return store, nil
 }
 
-// MatcherStore implements all interfaces in the vulnstore package
+// MatcherStore implements [datastore.MatcherStore].
 type MatcherStore struct {
 	pool *pgxpool.Pool
 	// Initialized is used as an atomic bool for tracking initialization.
 	initialized uint32
 }
 
+// NewMatcherStore initializes a [MatcherStore] with the provided
+// [pgxpool.Pool].
+//
+// The database is assumed to have migrations run.
 func NewMatcherStore(pool *pgxpool.Pool) *MatcherStore {
 	return &MatcherStore{
 		pool: pool,
@@ -46,7 +55,7 @@ var (
 	_ datastore.Vulnerability = (*MatcherStore)(nil)
 )
 
-// DeleteUpdateOperations implements vulnstore.Updater.
+// DeleteUpdateOperations implements [datastore.Updater].
 func (s *MatcherStore) DeleteUpdateOperations(ctx context.Context, id ...uuid.UUID) (int64, error) {
 	const query = `DELETE FROM update_operation WHERE ref = ANY($1::uuid[]);`
 	if len(id) == 0 {
@@ -55,6 +64,8 @@ func (s *MatcherStore) DeleteUpdateOperations(ctx context.Context, id ...uuid.UU
 
 	// Pgx seems unwilling to do the []uuid.UUID → uuid[] conversion, so we're
 	// forced to make some garbage here.
+	// TODO(hank) This should be possible in the driver layer now with v5; do
+	// some tests.
 	refStr := make([]string, len(id))
 	for i := range id {
 		refStr[i] = id[i].String()
@@ -66,12 +77,12 @@ func (s *MatcherStore) DeleteUpdateOperations(ctx context.Context, id ...uuid.UU
 	return tag.RowsAffected(), nil
 }
 
-// RecordUpdaterStatus records that an updater is up to date with vulnerabilities at this time
+// RecordUpdaterStatus records that an updater is up to date with vulnerabilities at this time.
 func (s *MatcherStore) RecordUpdaterStatus(ctx context.Context, updaterName string, updateTime time.Time, fingerprint driver.Fingerprint, updaterError error) error {
 	return recordUpdaterStatus(ctx, s.pool, updaterName, updateTime, fingerprint, updaterError)
 }
 
-// RecordUpdaterSetStatus records that all updaters from a updater set are up to date with vulnerabilities at this time
+// RecordUpdaterSetStatus records that all updaters from a updater set are up to date with vulnerabilities at this time.
 func (s *MatcherStore) RecordUpdaterSetStatus(ctx context.Context, updaterSet string, updateTime time.Time) error {
 	return recordUpdaterSetStatus(ctx, s.pool, updaterSet, updateTime)
 }

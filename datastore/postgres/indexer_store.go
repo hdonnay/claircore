@@ -12,7 +12,12 @@ import (
 	"github.com/quay/claircore/indexer"
 )
 
-// InitPostgresIndexerStore initialize a indexer.Store given the pgxpool.Pool
+// InitPostgresIndexerStore initializes an [indexer.Store] with the provided
+// [pgxpool.Pool], running migrations if "doMigration" is true.
+//
+// Deprecated: Use [NewIndexerStore] with [migrations.Indexer] directly if needed.
+//
+//go:fix inline
 func InitPostgresIndexerStore(ctx context.Context, pool *pgxpool.Pool, doMigration bool) (indexer.Store, error) {
 	if doMigration {
 		if err := migrations.Indexer(ctx, pool.Config().ConnConfig); err != nil {
@@ -29,13 +34,17 @@ func InitPostgresIndexerStore(ctx context.Context, pool *pgxpool.Pool, doMigrati
 
 var _ indexer.Store = (*IndexerStore)(nil)
 
-// IndexerStore implements the claircore.Store interface.
-//
-// All the other exported methods live in their own files.
+// IndexerStore implements [indexer.Store].
 type IndexerStore struct {
 	pool *pgxpool.Pool
 }
 
+// All the other exported methods live in their own files.
+
+// NewIndexerStore initializes an [IndexerStore] with the provided
+// [pgxpool.Pool].
+//
+// The database is assumed to have migrations run.
 func NewIndexerStore(pool *pgxpool.Pool) *IndexerStore {
 	return &IndexerStore{
 		pool: pool,
