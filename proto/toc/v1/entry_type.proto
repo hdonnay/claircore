@@ -1,0 +1,14 @@
+edition = "2023";
+
+package toc.v1;
+
+enum EntryType {
+  ENTRY_TYPE_UNSPECIFIED = 0;
+  ENTRY_TYPE_DIR = 1;
+  ENTRY_TYPE_REG = 2;
+  ENTRY_TYPE_SYMLINK = 3;
+  ENTRY_TYPE_HARDLINK = 4;
+  ENTRY_TYPE_CHAR = 5;
+  ENTRY_TYPE_BLOCK = 6;
+  ENTRY_TYPE_FIFO = 7;
+}

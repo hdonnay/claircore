@@ -1,0 +1,17 @@
+# For details on buf.yaml configuration, visit https://buf.build/docs/configuration/v2/buf-yaml
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  ignore_only:
+      PACKAGE_VERSION_SUFFIX:
+        - proto/plan/
+breaking:
+  use:
+    - PACKAGE
+  ignore_unstable_packages: true
+deps:
+  - buf.build/googleapis/googleapis
+  - buf.build/bufbuild/protovalidate

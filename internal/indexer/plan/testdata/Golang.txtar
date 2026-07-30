@@ -1,0 +1,32 @@
+-- selectors.json --
+{
+  "aa": "false",
+  "bb": "false",
+  "cc": "false",
+  "zz": "false",
+  "gobin": "is_executable() && !is_dir()"
+}
+-- entries.json --
+[
+  {
+    "name": "bin/",
+    "type": "ENTRY_TYPE_DIR",
+    "uid": 0,
+    "gid": 0,
+    "mode": 493,
+    "size": 0
+  },
+  {
+    "name": "bin/gobin",
+    "type": "ENTRY_TYPE_REG",
+    "uid": 0,
+    "gid": 0,
+    "mode": 493,
+    "size": 4096
+  }
+]
+-- want.json --
+[
+  0,
+  8
+]

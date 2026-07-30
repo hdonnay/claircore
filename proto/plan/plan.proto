@@ -1,0 +1,15 @@
+edition = "2023";
+
+package plan;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/descriptor.proto";
+import "plan/version.proto";
+
+message Header {
+  google.protobuf.FileDescriptorSet descriptor_set = 1;
+  Version version = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+}

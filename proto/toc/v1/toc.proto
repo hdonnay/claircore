@@ -1,0 +1,11 @@
+edition = "2023";
+
+package toc.v1;
+
+import "buf/validate/validate.proto";
+import "toc/v1/toc_entry.proto";
+
+message TOC {
+  int32 version = 1 [(buf.validate.field).int32.const = 1];
+  repeated TOCEntry entries = 2;
+}

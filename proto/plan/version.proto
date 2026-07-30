@@ -1,0 +1,8 @@
+edition = "2023";
+
+package plan;
+
+enum Version {
+  VERSION_UNSPECIFIED = 0;
+  VERSION_V1 = 1;
+}

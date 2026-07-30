@@ -1,0 +1,20 @@
+-- selectors.json --
+{
+  "a": "!is_dir()",
+  "b": "is_dir()"
+}
+-- entries.json --
+[
+  {
+    "name": "emptyfile",
+	"type": "ENTRY_TYPE_REG",
+	"uid": 1000,
+	"gid": 1000,
+	"mode": 493,
+	"size": 0
+  }
+]
+-- want.json --
+[
+  1
+]

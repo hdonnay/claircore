@@ -1,0 +1,19 @@
+edition = "2023";
+
+package plan.v1;
+
+import "buf/validate/validate.proto";
+import "toc/v1/toc_entry.proto";
+
+message Entry {
+  option (buf.validate.message).oneof = {
+    fields: [
+      "result",
+      "error"
+    ]
+    required: true
+  };
+  toc.v1.TOCEntry entry = 1 [(buf.validate.field).required = true];
+  uint64 result = 2;
+  string error = 3;
+}

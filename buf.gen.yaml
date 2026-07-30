@@ -1,0 +1,18 @@
+version: v2
+clean: true
+managed:
+  enabled: true
+  disable:
+    - module: buf.build/bufbuild/protovalidate
+    - module: buf.build/googleapis/googleapis
+  override:
+    - file_option: go_package_prefix
+      value: github.com/quay/claircore/internal/proto/gen
+plugins:
+  - local: ["go", "run", "google.golang.org/protobuf/cmd/protoc-gen-go@latest"]
+    out: internal/proto/gen
+    opt:
+      - paths=source_relative
+      - default_api_level=API_OPAQUE
+inputs:
+  - directory: proto

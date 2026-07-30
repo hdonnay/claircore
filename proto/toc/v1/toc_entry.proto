@@ -1,0 +1,42 @@
+edition = "2023";
+
+package toc.v1;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/timestamp.proto";
+import "toc/v1/entry_type.proto";
+
+message TOCEntry {
+  option (buf.validate.message).cel = {
+    id: "reg_size"
+    message: "the size must be set when type == \"reg\""
+    expression: "this.type != 2 || has(this.size)"
+  };
+  option (buf.validate.message).cel = {
+    id: "link_name"
+    message: "the link_name must be set when type in [\"symlink\", \"hardlink\"]"
+    expression: "! (this.type in [3, 4]) || has(this.link_name)"
+  };
+  option (buf.validate.message).cel = {
+    id: "dev_number"
+    message: "dev_major and dev_minor must be set when type in [\"char\", \"block\"]"
+    expression: "! (this.type in [5, 6]) || (has(this.dev_major) && has(this.dev_minor))"
+  };
+  string name = 1 [(buf.validate.field).required = true];
+  EntryType type = 2 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).enum.defined_only = true
+  ];
+  uint64 size = 3;
+  google.protobuf.Timestamp modtime = 4;
+  string link_name = 5;
+  int64 mode = 6 [(buf.validate.field).required = true];
+  uint32 uid = 7 [(buf.validate.field).required = true];
+  uint32 gid = 8 [(buf.validate.field).required = true];
+  string user_name = 9;
+  string group_name = 10;
+  uint32 dev_major = 11;
+  uint32 dev_minor = 12;
+  map<string, bytes> xattrs = 13;
+  string digest = 14;
+}

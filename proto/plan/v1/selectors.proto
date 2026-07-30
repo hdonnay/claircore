@@ -1,0 +1,8 @@
+edition = "2023";
+
+package plan.v1;
+
+message Selectors {
+  string expression = 1;
+  repeated string name = 2;
+}
