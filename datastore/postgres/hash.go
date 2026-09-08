@@ -37,7 +37,8 @@ func doHash[H hash.Hash](h H, v *claircore.Vulnerability) {
 		writeString(h, v.Dist.VersionCodeName)
 		writeString(h, v.Dist.VersionID)
 		writeString(h, v.Dist.Arch)
-		writeString(h, v.Dist.CPE.BindFS())
+		b, _ := v.Dist.CPE.AppendText(tmp)
+		h.Write(b)
 		writeString(h, v.Dist.PrettyName)
 	}
 	if v.Repo != nil {

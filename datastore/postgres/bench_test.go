@@ -36,7 +36,7 @@ func md5Baseline(v *claircore.Vulnerability) (string, []byte) {
 		b.WriteString(v.Dist.VersionCodeName)
 		b.WriteString(v.Dist.VersionID)
 		b.WriteString(v.Dist.Arch)
-		b.WriteString(v.Dist.CPE.BindFS())
+		b.WriteString(v.Dist.CPE.BindFS()) // [BindFS] usage grandfathered in.
 		b.WriteString(v.Dist.PrettyName)
 	}
 	if v.Repo != nil {

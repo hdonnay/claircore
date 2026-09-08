@@ -218,13 +218,20 @@ func (r *RepositoryScanner) Scan(ctx context.Context, l *claircore.Layer) ([]*cl
 				"url", bugURL(cpeID, err))
 			continue
 		}
+		name, err := c.AppendText(nil)
+		if err != nil {
+			slog.ErrorContext(ctx, "unable to roundtrip CPE",
+				"reason", err,
+				"cpeID", cpeID)
+			continue
+		}
 
 		uri := url.Values{
 			"repoid": {repoid},
 		}
 		r := &claircore.Repository{
 			Key:  repositoryKey,
-			Name: c.BindFS(),
+			Name: string(name),
 			CPE:  c,
 			URI:  uri.Encode(),
 		}
@@ -235,13 +242,13 @@ func (r *RepositoryScanner) Scan(ctx context.Context, l *claircore.Layer) ([]*cl
 		if ord := strings.Compare(a.Name, b.Name); ord != 0 {
 			return ord
 		}
-		if ord := strings.Compare(a.CPE.BindFS(), b.CPE.BindFS()); ord != 0 {
+		if ord := strings.Compare(a.CPE.String(), b.CPE.String()); ord != 0 {
 			return ord
 		}
 		return 0
 	})
 	repositories = slices.CompactFunc(repositories, func(a, b *claircore.Repository) bool {
-		return a.Name == b.Name && a.CPE.BindFS() == b.CPE.BindFS() && a.URI == b.URI
+		return a.Name == b.Name && a.CPE.String() == b.CPE.String() && a.URI == b.URI
 	})
 
 	return repositories, nil
