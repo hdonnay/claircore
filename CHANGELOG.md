@@ -1,3 +1,39 @@
+<a name="v1.6.0"></a>
+## [v1.6.0] - 2026-09-08
+[v1.6.0]: https://github.com/quay/claircore/compare/v1.5.54...v1.6.0
+
+- postgres: batch alias linking instead of giant slices
+  <details>
+  Vulnerability inserts were already flushed in batches. Alias and self
+  links were not: every pair was accumulated, then written in bulk.
+  Those links now run in the per-batch callback chain, so peak memory
+  drops in exchange for more round-trips and added latency.
+  </details>
+
+- vex: update Red Hat VEX URL to the new feed
+  <details>
+  Red Hat Product Security now produces a new security feed with some data
+  improvements. This release changes the default VEX URL, this URL can be
+  changed via the updater config if desired.
+  </details>
+
+- jsonblob: add an iterator interface
+  <details>
+  Loader.All streams entries instead of buffering them, lowering peak
+  memory. Next/Entry/Load are deprecated; callers can return Vulnerability
+  and EnrichmentRecord values to a shared pool.
+  </details>
+
+- vex: Ingest certain kernel vulnerabilities from Red Hat VEX data
+  <details>
+  There is now an allowList of kernel packages that the VEX parser will ingest.
+  The config also gives the operator the ability to restore previous behaviour
+  of the RHEL VEX parser to ignore kernel vulnerabilities. Setting the
+  ignore_kernel_packages flag to true will change the updater
+  fingerprint and force a full update (as will subsequently removing
+  it/setting it to false).
+  </details>
+
 <a name="v1.5.54"></a>
 ## [v1.5.54] - 2026-07-20
 [v1.5.54]: https://github.com/quay/claircore/compare/v1.5.53...v1.5.54
