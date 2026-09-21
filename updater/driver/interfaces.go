@@ -2,6 +2,7 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"net/http"
 	"time"
@@ -15,8 +16,13 @@ import (
 type ConfigUnmarshaler func(any) error
 
 type Updater interface {
-	Update(context.Context, *http.Client, UpdateBuilder) error
+	UpdateAdvisories(context.Context, *http.Client, UpdateBuilder) error
 }
+
+var (
+	ErrAgain = errors.New("run updater again")
+	ErrSkip  = errors.New("skip updater run")
+)
 
 type UpdateBuilder interface {
 	// Meta:
@@ -58,7 +64,15 @@ type Alias struct {
 	Name  string
 }
 
+func NewAlias(space, name string) Alias {
+	return Alias{
+		Space: unique.Make(space),
+		Name:  name,
+	}
+}
+
 type AdvisoryBuilder interface {
+	Title(context.Context, string) error
 	Description(context.Context, string) error
 	Issued(context.Context, time.Time) error
 	Updated(context.Context, time.Time) error
@@ -89,7 +103,7 @@ type ArtifactBuilder interface {
 	// CPE sets the CPE Name for the artifact.
 	//
 	// If available, this should be called no matter the state.
-	CPE(context.Context, cpe.WFN) error
+	CPE(context.Context, *cpe.WFN) error
 
 	// EndOfLife ...
 	//
@@ -120,7 +134,7 @@ type ArtifactBuilder interface {
 	// state.
 	CVSSv4(context.Context, cvss.V4) error
 	// Severity ...
-	Severity(_ context.Context, orig string, norm Severity) error
+	Severity(ctx context.Context, orig string, norm Severity) error
 
 	// Attrs sets additional unstructured attributes.
 	Attrs(context.Context, iter.Seq2[string, string]) error
